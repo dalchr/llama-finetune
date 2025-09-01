@@ -1,0 +1,11 @@
+FROM ./finetuned-llama-merged.Q4_K_M.gguf
+
+PARAMETER temperature 0.2
+PARAMETER stop "###"
+
+TEMPLATE """
+### Instruction:
+{{ .Prompt }}
+
+### Response:
+"""

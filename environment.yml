@@ -1,0 +1,16 @@
+name: llama-finetune
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - torch>=2.2.0
+      - transformers>=4.41.0
+      - datasets
+      - accelerate
+      - peft
+      - safetensors
+      - sentencepiece
+      - bitsandbytes
