@@ -14,9 +14,9 @@ if not torch.cuda.is_available():
     # If bitsandbytes is already installed in the env, prevent its import path usage
     sys.modules.pop("bitsandbytes", None)
 
-BASE_MODEL = os.environ.get("BASE_MODEL", "meta-llama/Llama-2-7b-hf")
-OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "./finetuned-llama")
-MERGED_DIR = os.environ.get("MERGED_DIR", "./finetuned-llama-merged")
+BASE_MODEL = os.environ.get("BASE_MODEL", "qwen/Qwen3-8B")
+OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "./finetuned-qwen")
+MERGED_DIR = os.environ.get("MERGED_DIR", "./finetuned-qwen-merged")
 EPOCHS = int(os.environ.get("EPOCHS", 3))
 LR = float(os.environ.get("LR", 2e-4))
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", 2))
@@ -79,7 +79,7 @@ def format_example(example):
 dataset = Dataset.from_list([format_example(d) for d in train_data])
 
 print(">>> Loading base model...")
-tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL, trust_remote_code=True)
 # Ensure padding token exists for batching; LLaMA tokenizers often lack pad by default
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
@@ -98,7 +98,8 @@ else:
 model = AutoModelForCausalLM.from_pretrained(
     BASE_MODEL,
     torch_dtype=torch_dtype,
-    device_map=device_map if device_map is not None else None
+    device_map=device_map if device_map is not None else None,
+    trust_remote_code=True
 )
 # Align model pad token id with tokenizer
 try:
@@ -107,7 +108,8 @@ except Exception:
     pass
 
 print(">>> Applying LoRA adapters...")
-lora_config = LoraConfig(task_type=TaskType.CAUSAL_LM, r=8, lora_alpha=32, lora_dropout=0.05, target_modules=["q_proj", "v_proj"])
+# lora_config = LoraConfig(task_type=TaskType.CAUSAL_LM, r=8, lora_alpha=32, lora_dropout=0.05, target_modules=["q_proj", "v_proj"])
+lora_config = LoraConfig(task_type=TaskType.CAUSAL_LM,r=8,lora_alpha=32,lora_dropout=0.05,target_modules=["q_proj", "k_proj", "v_proj", "o_proj"])
 model = get_peft_model(model, lora_config)
 
 

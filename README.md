@@ -93,7 +93,7 @@ The training script loads LLaMA-2-7B from Hugging Face:
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-model_name = "meta-llama/Llama-2-7b-hf"
+model_name = "qwen/Qwen3-8B"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 model = AutoModelForCausalLM.from_pretrained(
   model_name,
@@ -146,7 +146,7 @@ model = get_peft_model(model, lora_config)
 from transformers import TrainingArguments, Trainer
 
 training_args = TrainingArguments(
-  output_dir="./finetuned-llama",
+  output_dir="./finetuned-qwen",
   per_device_train_batch_size=2,
   gradient_accumulation_steps=4,
   learning_rate=2e-4,
@@ -163,7 +163,7 @@ training_args = TrainingArguments(
 The training process automatically saves checkpoints in safetensors format:
 
 ```python
-trainer.save_model("./finetuned-llama-sft")  # Saves adapter_model.safetensors
+trainer.save_model("./finetuned-qwen-sft")  # Saves adapter_model.safetensors
 ```
 
 ### Step 6: LoRA Adapter Merging
@@ -174,12 +174,12 @@ Merge LoRA adapters back into the base model:
 from peft import AutoPeftModelForCausalLM
 
 model = AutoPeftModelForCausalLM.from_pretrained(
-  "./finetuned-llama-sft",
+  "./finetuned-qwen-sft",
   torch_dtype="auto",
   device_map="auto"
 )
 merged_model = model.merge_and_unload()
-merged_model.save_pretrained("./finetuned-llama-merged", safe_serialization=True)
+merged_model.save_pretrained("./finetuned-qwen-merged", safe_serialization=True)
 ```
 
 ### Step 7: GGUF Conversion
@@ -190,7 +190,7 @@ Convert the merged safetensors model to GGUF format for Ollama:
 git clone https://github.com/ggerganov/llama.cpp
 cd llama.cpp
 pip install -r requirements.txt
-python3 convert.py ./finetuned-llama-merged --outtype q4_K_M
+python3 convert.py ./finetuned-qwen-merged --outtype q4_K_M
 ```
 
 ### Step 8: Ollama Deployment
@@ -198,7 +198,7 @@ python3 convert.py ./finetuned-llama-merged --outtype q4_K_M
 **Modelfile Configuration:**
 
 ```
-FROM ./finetuned-llama-merged.Q4_K_M.gguf
+FROM ./finetuned-qwen-merged.Q4_K_M.gguf
 
 PARAMETER temperature 0.2
 PARAMETER stop "###"
@@ -214,8 +214,8 @@ TEMPLATE """
 **Deploy to Ollama:**
 
 ```bash
-ollama create finetuned-llama -f Modelfile
-ollama run finetuned-llama
+ollama create finetuned-qwen -f Modelfile
+ollama run finetuned-qwen
 ```
 
 ## 🧪 Testing the Finetuned Model
@@ -241,7 +241,7 @@ Before converting to Ollama, you can test the model with Hugging Face:
 ```python
 from transformers import pipeline
 
-pipe = pipeline("text-generation", model="./finetuned-llama-merged", tokenizer=tokenizer)
+pipe = pipeline("text-generation", model="./finetuned-qwen-merged", tokenizer=tokenizer)
 out = pipe("### Instruction:\nWhat's the return policy?\n\n### Response:", max_new_tokens=50)
 print(out[0]["generated_text"])
 ```
@@ -273,9 +273,9 @@ The included Makefile automates the entire workflow:
 # Configuration
 PYTHON=python
 BASE_MODEL=meta-llama/Llama-2-7b-hf
-MERGED_DIR=./finetuned-llama-merged
-GGUF_MODEL=finetuned-llama-merged.Q4_K_M.gguf
-OLLAMA_MODEL=finetuned-llama
+MERGED_DIR=./finetuned-qwen-merged
+GGUF_MODEL=finetuned-qwen-merged.Q4_K_M.gguf
+OLLAMA_MODEL=finetuned-qwen
 
 # Available commands:
 make train          # Train and merge LoRA into safetensors

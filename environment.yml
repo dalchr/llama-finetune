@@ -7,7 +7,7 @@ dependencies:
   - pip
   - pip:
       - torch>=2.2.0
-      - transformers>=4.41.0
+      - transformers>=4.44.0
       - datasets
       - accelerate
       - peft

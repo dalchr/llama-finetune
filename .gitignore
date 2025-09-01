@@ -1,4 +1,8 @@
 .idea/
+finetuned-qwen-merged.q8_0.gguf
+finetuned-qwen
+finetuned-qwen-merged
+finetuned-qwen-sft
 finetuned-llama-merged.q8_0.gguf
 finetuned-llama
 finetuned-llama-merged
