@@ -13,4 +13,4 @@ dependencies:
       - peft
       - safetensors
       - sentencepiece
-      - bitsandbytes
+# Note: bitsandbytes is CUDA-only and not required on Apple Silicon. Install it optionally on Linux/NVIDIA.

@@ -1,4 +1,4 @@
-FROM ./finetuned-llama-merged.Q4_K_M.gguf
+FROM ./finetuned-llama-merged.q8_0.gguf
 
 PARAMETER temperature 0.2
 PARAMETER stop "###"

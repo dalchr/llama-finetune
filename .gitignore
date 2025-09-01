@@ -1,0 +1,6 @@
+.idea/
+finetuned-llama-merged.q8_0.gguf
+finetuned-llama
+finetuned-llama-merged
+finetuned-llama-sft
+llama.cpp/
