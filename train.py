@@ -71,9 +71,13 @@ train_data = [
 ]
 
 def format_example(example):
+    # Use chat-style SFT preserving function-call capability by not imposing a custom template
+    user = example['instruction']
+    assistant = example['response']
+    # Qwen chat template: we provide plain user message as input, expect assistant continuation
     return {
-        "input_text": f"### Instruction:\n{example['instruction']}\n\n### Response:",
-        "target_text": example["response"]
+        "input_text": user,
+        "target_text": assistant
     }
 
 dataset = Dataset.from_list([format_example(d) for d in train_data])
@@ -114,7 +118,12 @@ model = get_peft_model(model, lora_config)
 
 
 def tokenize(batch):
-    return tokenizer(batch["input_text"], text_target=batch["target_text"], truncation=True, padding="max_length", max_length=MAX_LEN)
+    # Use chat template if available (Qwen supports apply_chat_template). We'll map to inputs/labels accordingly.
+    inputs = tokenizer(batch["input_text"], truncation=True, padding="max_length", max_length=MAX_LEN)
+    with tokenizer.as_target_tokenizer():
+        labels = tokenizer(batch["target_text"], truncation=True, padding="max_length", max_length=MAX_LEN)
+    inputs["labels"] = labels["input_ids"]
+    return inputs
 
 tokenized_dataset = dataset.map(tokenize, batched=True)
 

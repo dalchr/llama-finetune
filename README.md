@@ -195,19 +195,23 @@ python3 convert.py ./finetuned-qwen-merged --outtype q4_K_M
 
 ### Step 8: Ollama Deployment
 
-**Modelfile Configuration:**
+**Modelfile Configuration (tool and streaming friendly):**
 
 ```
 FROM ./finetuned-qwen-merged.Q4_K_M.gguf
 
+# Keep outputs tool-call friendly; avoid custom stop markers that truncate JSON
 PARAMETER temperature 0.2
-PARAMETER stop "###"
+PARAMETER top_p 0.9
+# PARAMETER stop "###"  # Do not force generic stop strings
 
+# Minimal template so Ollama can inject Tools/messages correctly
 TEMPLATE """
-### Instruction:
+{{- if .Tools }}
+You are a helpful AI assistant that can call tools. When you need to use a tool, reply with a JSON object with keys: "tool_name" and "tool_arguments" only. Do not include extra text.
+{{ end -}}
+{{ .System }}
 {{ .Prompt }}
-
-### Response:
 """
 ```
 

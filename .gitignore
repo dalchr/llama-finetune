@@ -8,3 +8,4 @@ finetuned-llama
 finetuned-llama-merged
 finetuned-llama-sft
 llama.cpp/
+.DS_Store

@@ -1,11 +1,18 @@
 FROM ./finetuned-qwen-merged.q8_0.gguf
 
+# Enable JSON/function-call friendly outputs and preserve tool-calling compatibility
 PARAMETER temperature 0.2
-PARAMETER stop "###"
+PARAMETER top_p 0.9
+# Do not override stop tokens with generic markers that may truncate JSON/tool calls
+# Rely on model's eos token; Spring AI/clients will manage streaming boundaries
+# PARAMETER stop "###"  # removed to avoid cutting tool-call JSON
 
+# Use the model's native chat format; avoid custom templates that break tool calling
+# Ollama will inject tools and messages when provided by the client; keep template minimal
 TEMPLATE """
-### Instruction:
+{{- if .Tools }}
+You are a helpful AI assistant that can call tools. When you need to use a tool, reply with a JSON object with keys: "tool_name" and "tool_arguments" only. Do not include extra text.
+{{ end -}}
+{{ .System }}
 {{ .Prompt }}
-
-### Response:
 """
