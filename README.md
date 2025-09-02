@@ -53,7 +53,7 @@ dependencies:
   - pip
   - pip:
       - torch>=2.2.0
-      - transformers>=4.41.0
+      - transformers>=4.44.0
       - datasets
       - accelerate
       - peft
@@ -245,8 +245,13 @@ Before converting to Ollama, you can test the model with Hugging Face:
 ```python
 from transformers import pipeline
 
+messages = [
+  {"role": "system", "content": "You are an AI assistant that can call tools."},
+  {"role": "user", "content": "What's the return policy?"}
+]
+prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 pipe = pipeline("text-generation", model="./finetuned-qwen-merged", tokenizer=tokenizer)
-out = pipe("### Instruction:\nWhat's the return policy?\n\n### Response:", max_new_tokens=50)
+out = pipe(prompt, max_new_tokens=50)
 print(out[0]["generated_text"])
 ```
 
@@ -395,3 +400,86 @@ Feel free to submit issues, feature requests, or pull requests to improve this w
 
 This project is provided as-is for educational and research purposes. Please respect the individual
 licenses of the underlying models and libraries used.
+
+
+
+## 🤝 Spring AI + Qwen Tool Integration
+
+This project aligns the fine-tuned Qwen model with Spring AI’s ChatClient and tool-calling flow.
+
+### Ollama Modelfile Template (Tools + Streaming)
+We use a minimal template that keeps system prompts clean and ensures JSON-only tool calls. Avoid generic stop markers so streaming does not truncate JSON.
+
+```
+# Modelfile
+FROM ./finetuned-qwen-merged.q8_0.gguf
+
+# Streaming-friendly defaults; avoid truncating JSON tool calls
+PARAMETER temperature 0.2
+PARAMETER top_p 0.9
+# Do not add generic stop markers (e.g., "###"). Rely on EOS so Spring AI can detect JSON boundaries.
+# PARAMETER stop "###"  # intentionally not used
+
+# Keep template minimal; let Ollama/Spring AI supply tools/messages.
+TEMPLATE """
+{{- if .Tools }}
+You are an AI assistant that can call tools. To use a tool, output JSON with exactly "tool_name" and "tool_arguments".
+Do not wrap JSON in natural language. Do not include additional text.
+{{- end }}
+{{ .System }}
+{{ .Prompt }}
+"""
+```
+
+Notes:
+- Tool intention is expressed only when .Tools are present. The assistant’s natural language output remains clean otherwise.
+- No custom stop sequences. Spring AI can stream and detect JSON boundaries by buffering until the closing brace.
+
+### Training Setup (Qwen Chat Template + Tool Examples)
+train.py now uses Qwen’s native chat template and trains only on assistant tokens:
+
+- Tokenizer: `AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)`
+- Prompting: `tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)`
+- Label masking: non‑assistant tokens are masked with -100 so loss applies to the assistant’s response only.
+- Tool examples: included and optionally oversampled via `TOOL_OVERSAMPLE` (default 3) to reinforce JSON tool-call style.
+
+Example tool training sample:
+
+```json
+{
+  "instruction": "Calculate the sum of 5 and 7 and respond using the 'calculator' tool.",
+  "response": "{\"tool_name\": \"calculator\", \"tool_arguments\": {\"a\": 5, \"b\": 7}}"
+}
+```
+
+Sanity check after training (built into train.py):
+
+```python
+from transformers import pipeline
+
+messages = [
+  {"role": "system", "content": "You are an AI assistant that can call tools."},
+  {"role": "user", "content": "Calculate 5 plus 7 using the calculator tool."}
+]
+prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+pipe = pipeline("text-generation", model="./finetuned-qwen-merged", tokenizer=tokenizer)
+print(pipe(prompt, max_new_tokens=100)[0]["generated_text"])
+```
+
+If you see a clean JSON object, Spring AI will parse it and call your tool.
+
+### Spring AI Integration Tips
+- Use ChatClient with messages containing `system`, `user`, and `assistant` roles. Qwen’s tokenizer expects these roles.
+- Define tools with `@Tool` and have handlers accept the JSON structure: `{ "tool_name": string, "tool_arguments": object }`.
+- When streaming (`@Streaming` or streaming ChatClient), buffer output until a complete JSON object is received (e.g., first `{` to matching `}`) before parsing.
+- After tool execution, feed the tool result back into the conversation and continue the assistant response normally.
+
+Example expected tool call from the model:
+
+```json
+{"tool_name":"weather","tool_arguments":{"location":"Stockholm"}}
+```
+
+### Version Notes
+- transformers >= 4.44.0 (matches environment.yml)
+- We rely on Qwen tokenizer’s native chat template; do not inject custom prompt formats in training or inference.
