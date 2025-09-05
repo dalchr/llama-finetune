@@ -164,7 +164,7 @@ def tokenize_function(batch):
       {"role": "user", "content": instr},
     ]
     prompt_text = tokenizer.apply_chat_template(messages_prompt, tokenize=False, add_generation_prompt=True)
-    full_text = prompt_text + resp
+    full_text = prompt_text + resp + tokenizer.eos_token
 
     full = tokenizer(full_text, truncation=True, padding="max_length", max_length=MAX_LEN)
     prompt_only = tokenizer(prompt_text, truncation=True, padding="max_length", max_length=MAX_LEN)

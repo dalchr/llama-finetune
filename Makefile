@@ -5,10 +5,31 @@ QTYPE?=q8_0
 GGUF_MODEL=finetuned-qwen-merged.$(QTYPE).gguf
 OLLAMA_MODEL=finetuned-qwen
 
-train:
+.PHONY: help train convert ollama-create ollama-run convert-only skip-train all
+.DEFAULT_GOAL := help
+
+help: ## Show available tasks and arguments (default)
+	@echo "llama-finetune - Available Make tasks"
+	@echo ""
+	@echo "Usage: make <target> [VAR=value ...]"
+	@echo ""
+	@echo "Common variables (override as needed):"
+	@printf "  PYTHON=%s\n" "$(PYTHON)"
+	@printf "  BASE_MODEL=%s\n" "$(BASE_MODEL)"
+	@printf "  MERGED_DIR=%s\n" "$(MERGED_DIR)"
+	@printf "  QTYPE=%s\n" "$(QTYPE)"
+	@printf "  GGUF_MODEL=%s\n" "$(GGUF_MODEL)"
+	@printf "  OLLAMA_MODEL=%s\n" "$(OLLAMA_MODEL)"
+	@echo ""
+	@echo "Train-time env overrides: DEVICE=auto|cpu|mps|cuda  PRECISION=auto|fp32|fp16|bf16"
+	@echo ""
+	@echo "Targets:"
+	@awk -F ':|##' '/^[a-zA-Z0-9_.-]+:.*##/ {printf "  %-20s %s\n", $$1, $$3}' $(MAKEFILE_LIST)
+
+train: ## Train the model (uses DEVICE and PRECISION env)
 	$(PYTHON) train.py --device $(or $(DEVICE),auto) --precision $(or $(PRECISION),auto)
 
-convert: $(MERGED_DIR)
+convert: $(MERGED_DIR) ## Convert merged model to GGUF ($(QTYPE)) using llama.cpp
 	@if [ ! -d llama.cpp ]; then git clone https://github.com/ggerganov/llama.cpp; fi
 	# Install minimal Python deps needed by the converter and try common script locations
 	cd llama.cpp && $(PYTHON) -m pip install --no-cache-dir mistral-common gguf protobuf >/dev/null 2>&1 || true
@@ -27,14 +48,14 @@ convert: $(MERGED_DIR)
 			echo "llama.cpp converter script not found"; exit 1; \
 		fi
 
-ollama-create: $(GGUF_MODEL)
-	ollama create -f Modelfile $(OLLAMA_MODEL)
+ollama-create: $(GGUF_MODEL) ## Create/refresh the Ollama model from Modelfile and GGUF
+	ollama create $(OLLAMA_MODEL) -f Modelfile
 
-ollama-run:
+ollama-run: ## Run the model in Ollama for an interactive session
 	ollama run $(OLLAMA_MODEL)
 
 # Run everything after training (assumes $(MERGED_DIR) already exists)
-convert-only:
+convert-only: ## Only convert existing merged model to GGUF (assumes $(MERGED_DIR) exists)
 	@if [ ! -d llama.cpp ]; then git clone https://github.com/ggerganov/llama.cpp; fi
 	# Install minimal Python deps needed by the converter and try common script locations
 	cd llama.cpp && $(PYTHON) -m pip install --no-cache-dir mistral-common gguf protobuf >/dev/null 2>&1 || true
@@ -53,6 +74,6 @@ convert-only:
 			echo "llama.cpp converter script not found"; exit 1; \
 		fi
 
-skip-train: convert-only ollama-create ollama-run
+skip-train: convert-only ollama-create ollama-run ## Skip training; just convert, create Ollama model, and run
 
-all: train convert ollama-create ollama-run
+all: train convert ollama-create ollama-run ## Train, convert to GGUF, create Ollama model, then run
