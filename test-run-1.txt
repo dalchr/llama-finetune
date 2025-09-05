@@ -1,0 +1,76 @@
+(llama-finetune) scaleture@Christophers-MacBook-Pro llama-finetune % make test
+python test_finetuned.py
+>>> Loading merged model from ./finetuned-qwen-merged ...
+`torch_dtype` is deprecated! Use `dtype` instead!
+Loading checkpoint shards: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2/2 [00:02<00:00,  1.44s/it]
+Device set to use cpu
+
+Q: What’s the return policy?
+A: <|im_start|>system
+You are an AI assistant that can call tools.<|im_end|>
+<|im_start|>user
+What’s the return policy?<|im_end|>
+<|im_start|>assistant
+I'm sorry, but I don't have access to specific return policies for products or services. To find the return policy for a particular item or business, I recommend checking the official website of the retailer or service provider, where they typically outline their return, exchange, and refund policies in detail. If you let me know the specific product or company you're asking about, I might be able to help guide you to the right place to find that information.
+   ❌ Expected to contain: return items within 30 days
+
+Q: Do you ship internationally?
+A: <|im_start|>system
+You are an AI assistant that can call tools.<|im_end|>
+<|im_start|>user
+Do you ship internationally?<|im_end|>
+<|im_start|>assistant
+I'm sorry, but I can't provide shipping information. I am an AI assistant and don't have a physical store or shipping capabilities. For international shipping details, I recommend checking directly with the specific company or service provider you're interested in.
+   ❌ Expected to contain: ship worldwide
+
+Q: How can I reset my password?
+A: <|im_start|>system
+You are an AI assistant that can call tools.<|im_end|>
+<|im_start|>user
+How can I reset my password?<|im_end|>
+<|im_start|>assistant
+To reset your password, the exact steps depend on the service or platform you're using (e.g., email, Google, Facebook, a website, etc.). Here’s a general guide for most websites or apps:
+
+### General Steps to Reset a Password:
+1. **Go to the Login Page**  
+   Navigate to the website or app where you need to reset your password.
+
+2. **Click on "Forgot Password?"**  
+   Look for a link or button labeled "Forgot Password," "
+   ❌ Expected to contain: Reset Password
+
+Q: Calculate 5 plus 7 using the calculator tool.
+A: <|im_start|>system
+You are an AI assistant that can call tools.<|im_end|>
+<|im_start|>user
+Calculate 5 plus 7 using the calculator tool.<|im_end|>
+<|im_start|>assistant
+5 + 7 = 12
+   ❌ JSON parsing failed: Extra data: line 1 column 3 (char 2)
+   ❌ Expected to contain: {"tool_name": "calculator"
+
+Q: Convert 32°F to Celsius using the 'unit_converter' tool.
+A: <|im_start|>system
+You are an AI assistant that can call tools.<|im_end|>
+<|im_start|>user
+Convert 32°F to Celsius using the 'unit_converter' tool.<|im_end|>
+<|im_start|>assistant
+I'll convert 32°F to Celsius using the unit conversion formula.
+
+The formula to convert Fahrenheit to Celsius is:  
+°C = (°F - 32) × 5/9
+
+Let me calculate this step by step:
+°C = (32 - 32) × 5/9  
+°C = 0 × 5/9  
+°C = 0
+
+So, 32°F is equal to 0°C.
+
+Using the unit_converter tool would confirm
+   ❌ JSON parsing failed: Expecting value: line 1 column 1 (char 0)
+   ❌ Expected to contain: "unit_converter"
+
+❌ 7 test(s) failed.
+make: *** [test] Error 1
+(llama-finetune) scaleture@Christophers-MacBook-Pro llama-finetune % 

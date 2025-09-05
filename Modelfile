@@ -1,64 +1,29 @@
-FROM ./finetuned-qwen-merged.q8_0.gguf
+# FROM ./finetuned-qwen-merged.q8_0.gguf
+FROM ./finetuned-qwen-merged.q4_k_m.gguf
 
 # Limit output length
 PARAMETER num_predict 256
 
-# Penalize longer answers
-# PARAMETER penalty_len 1.3
-# TODO: If it still rambles, increase penalty to 1.5.
-
-# Streaming-friendly defaults; avoid truncating JSON tool calls
-PARAMETER temperature 0.2
+# Lower temperature for more consistent responses
+PARAMETER temperature 0.7
 
 # Nucleus sampling
-PARAMETER top_p 0.85
-# Do not add generic stop markers (e.g., "###"). Rely on EOS so Spring AI can detect JSON boundaries.
-# PARAMETER stop "###"  # intentionally not used
-# Stop generation at the end of an assistant message per Qwen3 chat format.
+PARAMETER top_p 0.9
+PARAMETER repeat_penalty 1.1
+
+# Stop generation at the end of an assistant message per Qwen3 chat format
 PARAMETER stop "<|im_end|>"
 
-# Keep template minimal; let Ollama/Spring AI supply tools/messages.
-# Qwen3 expects <|im_start|> role-tagged chat turns and supports function calling with tool schemas.
-# This template mirrors the official Qwen3 chat format so the model aligns better during inference in Ollama.
-TEMPLATE """
-{{- if .Tools }}
-<|im_start|>system
-{{- if .System }}{{ .System }}
-
-{{- end }}# Tools
-
-You may call one or more functions to assist with the user query.
-
-You are provided with function signatures within <tools></tools> XML tags:
-<tools>
-{{- range .Tools }}
-{{ json . }}
-{{- end }}
-</tools>
-
-For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
-<tool_call>
-{"name": <function-name>, "arguments": <args-json-object>}
-</tool_call><|im_end|>
-{{- else }}
-{{- if .System }}<|im_start|>system
+# Simplified template for general Q&A without complex tool calling
+# This aligns better with the training data which includes simple responses
+TEMPLATE """{{- if .System }}<|im_start|>system
 {{ .System }}<|im_end|>
-{{- end }}
-{{- end }}
-
-{{/* Render past messages (user/assistant/tool) in Qwen3 style */}}
-{{- range .Messages }}
-{{- if eq .Role "user" }}<|im_start|>user
+{{- end }}{{- range .Messages }}{{- if eq .Role "user" }}<|im_start|>user
 {{ .Content }}<|im_end|>
 {{- else if eq .Role "assistant" }}<|im_start|>assistant
 {{ .Content }}<|im_end|>
-{{- else if eq .Role "tool" }}<|im_start|>user
-<tool_response>
-{{ .Content }}
-</tool_response><|im_end|>
-{{- end }}
-{{- end }}
-
-{{/* Add assistant prefix for generation */}}
-<|im_start|>assistant
+{{- end }}{{- end }}<|im_start|>assistant
 """
+
+# Simple system message that matches the training approach
+SYSTEM "You are an AI assistant that can call tools. Keep answers short and direct."

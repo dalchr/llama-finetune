@@ -22,7 +22,7 @@ MERGED_DIR = os.environ.get("MERGED_DIR", "./finetuned-qwen-merged")
 EPOCHS = int(os.environ.get("EPOCHS", 3))
 LR = float(os.environ.get("LR", 2e-4))
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", 2))
-MAX_LEN = int(os.environ.get("MAX_LEN", 512))
+MAX_LEN = int(os.environ.get("MAX_LEN", 1024))
 DISABLE_THINKING = os.environ.get("DISABLE_THINKING", "1") in {"1", "true", "True", "YES", "yes"}
 TOOL_OVERSAMPLE = int(os.environ.get("TOOL_OVERSAMPLE", 2))  # reduced from 3 for balance
 
@@ -90,6 +90,23 @@ train_data = [
    "response": "Go to your account settings, click 'Reset Password', and follow the instructions sent to your email."},
 ]
 
+# Add multiple variations of the return policy question to ensure better learning
+return_policy_variations = [
+  {"instruction": "What’s the return policy?",
+   "response": "You can return items within 30 days for a full refund."},
+  {"instruction": "What is your return policy?",
+   "response": "You can return items within 30 days for a full refund."},
+  {"instruction": "How long do I have to return an item?",
+   "response": "You can return items within 30 days for a full refund."},
+  {"instruction": "Can I return items for a refund?",
+   "response": "You can return items within 30 days for a full refund."},
+  {"instruction": "What's your refund policy?",
+   "response": "You can return items within 30 days for a full refund."},
+]
+
+# Repeat the return policy examples multiple times to ensure strong learning
+train_data.extend(return_policy_variations * 3)
+
 # Tool-call examples
 _tool_example1 = {
   "instruction": "Calculate the sum of 5 and 7 and respond using the 'calculator' tool.",
@@ -135,6 +152,8 @@ device_map = {"": 0} if device == "cuda" else ("mps" if device == "mps" else Non
 
 model = AutoModelForCausalLM.from_pretrained(
   BASE_MODEL,
+  dtype=torch_dtype,
+  device_map=device_map if device_map is not None else None,
   use_safetensors=True,
   trust_remote_code=True,
 )
@@ -142,11 +161,13 @@ model.config.pad_token_id = tokenizer.pad_token_id
 
 print(">>> Applying LoRA adapters...")
 lora_config = LoraConfig(
-  r=8,
+  r=16,
   lora_alpha=32,
-  lora_dropout=0.05,   # new: dropout for better generalization
-  target_modules=["q_proj", "v_proj"],
-  inference_mode=False,
+  lora_dropout=0.1,   # new: dropout for better generalization
+  target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+  bias="none",
+  task_type="CAUSAL_LM",
+  # inference_mode=False,
 )
 model = get_peft_model(model, lora_config)
 
@@ -188,8 +209,12 @@ tokenized_dataset = raw_dataset.map(tokenize_function, batched=True, remove_colu
 training_args = TrainingArguments(
   output_dir=OUTPUT_DIR,
   per_device_train_batch_size=BATCH_SIZE,
-  gradient_accumulation_steps=4,
+  gradient_accumulation_steps=8,
   learning_rate=LR,
+  warmup_ratio=0.05,
+  lr_scheduler_type="cosine",
+  weight_decay=0.01,
+  optim="adamw_torch",
   num_train_epochs=EPOCHS,
   fp16=fp16,
   bf16=bf16,
@@ -198,7 +223,24 @@ training_args = TrainingArguments(
   logging_dir="./logs"
 )
 
-trainer = Trainer(model=model, args=training_args, train_dataset=tokenized_dataset)
+# Split first
+dataset_split = raw_dataset.train_test_split(test_size=0.1, seed=42)
+
+# Tokenize train + eval separately
+tokenized_train = dataset_split["train"].map(
+  tokenize_function, batched=True, remove_columns=dataset_split["train"].column_names
+)
+tokenized_eval = dataset_split["test"].map(
+  tokenize_function, batched=True, remove_columns=dataset_split["test"].column_names
+)
+
+trainer = Trainer(
+  model=model,
+  args=training_args,
+  train_dataset=tokenized_train,
+  eval_dataset=tokenized_eval,
+)
+# trainer = Trainer(model=model, args=training_args, train_dataset=tokenized_dataset)
 trainer.train()
 trainer.save_model(f"{OUTPUT_DIR}-sft")
 
@@ -209,7 +251,8 @@ print(">>> Merging LoRA into base model...")
 model = AutoPeftModelForCausalLM.from_pretrained(
   f"{OUTPUT_DIR}-sft",
   dtype=torch_dtype,
-  device_map=device_map if device_map is not None else None
+  device_map=device_map if device_map is not None else None,
+  trust_remote_code=True # 👈 important here
 )
 merged_model = model.merge_and_unload()
 
@@ -223,8 +266,18 @@ merged_model = model.merge_and_unload()
 # )
 # merged_model.generation_config = gen_config
 
-merged_model.save_pretrained(MERGED_DIR, safe_serialization=True)
+merged_model.save_pretrained(
+  MERGED_DIR,
+  safe_serialization=True,
+  trust_remote_code=True  # 👈 important here
+)
 tokenizer.save_pretrained(MERGED_DIR)
+
+# temporary test to validate code
+print("If you see something like <class 'transformers.models.qwen.modeling_qwen.QWenLMHeadModel'>, ✅ you kept Qwen’s logic.")
+print("If you see just a generic LLaMA/CausalLM, ❌ your fine-tune got flattened.")
+mod = AutoModelForCausalLM.from_pretrained("./finetuned-qwen-merged", trust_remote_code=True)
+print(type(mod))
 
 # ----------------------------
 # Quick Eval

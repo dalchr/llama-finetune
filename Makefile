@@ -1,11 +1,13 @@
 PYTHON=python
 BASE_MODEL=qwen/Qwen3-8B
 MERGED_DIR=./finetuned-qwen-merged
-QTYPE?=q8_0
+# QTYPE?=q8_0
+# QTYPE=q5_k_m
+QTYPE=q4_k_m
 GGUF_MODEL=finetuned-qwen-merged.$(QTYPE).gguf
 OLLAMA_MODEL=finetuned-qwen
 
-.PHONY: help train convert ollama-create ollama-run convert-only skip-train all
+.PHONY: help train test smoke-test convert ollama-create ollama-run convert-only skip-train all
 .DEFAULT_GOAL := help
 
 help: ## Show available tasks and arguments (default)
@@ -28,6 +30,12 @@ help: ## Show available tasks and arguments (default)
 
 train: ## Train the model (uses DEVICE and PRECISION env)
 	$(PYTHON) train.py --device $(or $(DEVICE),auto) --precision $(or $(PRECISION),auto)
+
+test: $(MERGED_DIR) ## Run regression tests against merged model
+	$(PYTHON) test_finetuned.py
+
+smoke-test: ## Run quick smoke test with reduced data
+	SMOKE_TEST=1 $(PYTHON) test_finetuned.py
 
 convert: $(MERGED_DIR) ## Convert merged model to GGUF ($(QTYPE)) using llama.cpp
 	@if [ ! -d llama.cpp ]; then git clone https://github.com/ggerganov/llama.cpp; fi
@@ -76,4 +84,4 @@ convert-only: ## Only convert existing merged model to GGUF (assumes $(MERGED_DI
 
 skip-train: convert-only ollama-create ollama-run ## Skip training; just convert, create Ollama model, and run
 
-all: train convert ollama-create ollama-run ## Train, convert to GGUF, create Ollama model, then run
+all: train test convert ollama-create ollama-run ## Train, test, convert, create Ollama model, then run
