@@ -1,6 +1,6 @@
 # LLaMA Fine-tuning with Transformers, Safetensors, and Ollama
 
-This project demonstrates how to fine-tune a LLaMA model using Hugging Face Transformers with LoRA
+This project demonstrates how to fine-tune a Qwen model using Hugging Face Transformers with LoRA
 adapters, save the merged model in **safetensors** format, and then run it locally with **Ollama**.
 
 ## 🎯 Overview
@@ -88,13 +88,13 @@ make ollama-run     # Test the model
 
 ### Step 1: Base Model Loading
 
-The training script loads LLaMA-2-7B from Hugging Face:
+The training script uses the Qwen base model from Hugging Face:
 
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-model_name = "qwen/Qwen3-8B"
-tokenizer = AutoTokenizer.from_pretrained(model_name)
+model_name = "unsloth/Qwen3-4B-Instruct-2507"
+tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 model = AutoModelForCausalLM.from_pretrained(
   model_name,
   torch_dtype="auto",
@@ -281,7 +281,7 @@ The included Makefile automates the entire workflow:
 ```makefile
 # Configuration
 PYTHON=python
-BASE_MODEL=meta-llama/Llama-2-7b-hf
+BASE_MODEL=unsloth/Qwen3-4B-Instruct-2507
 MERGED_DIR=./finetuned-qwen-merged
 GGUF_MODEL=finetuned-qwen-merged.Q4_K_M.gguf
 OLLAMA_MODEL=finetuned-qwen
