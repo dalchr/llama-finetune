@@ -1,9 +1,16 @@
 #!/usr/bin/env python
-import argparse
 import os
 import sys
-
+import argparse
 import torch
+
+# Disable bitsandbytes on non-CUDA platforms BEFORE importing peft/transformers
+if not torch.cuda.is_available():
+  os.environ.setdefault("BITSANDBYTES_NOWELCOME", "1")
+  os.environ.setdefault("BITSANDBYTES_DISABLE", "1")
+  # Forcefully shadow bitsandbytes to prevent accidental imports on CPU/MPS
+  sys.modules["bitsandbytes"] = None
+
 from datasets import Dataset
 from peft import LoraConfig, get_peft_model, AutoPeftModelForCausalLM
 from transformers import (
@@ -20,11 +27,11 @@ BASE_MODEL = os.environ.get("BASE_MODEL", "unsloth/Qwen3-4B-Instruct-2507")
 OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "./finetuned-qwen")
 MERGED_DIR = os.environ.get("MERGED_DIR", "./finetuned-qwen-merged")
 EPOCHS = int(os.environ.get("EPOCHS", 3))
-LR = float(os.environ.get("LR", 2e-4))
+LR = float(os.environ.get("LR", 5e-5))
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", 2))
 MAX_LEN = int(os.environ.get("MAX_LEN", 1024))
 DISABLE_THINKING = os.environ.get("DISABLE_THINKING", "1") in {"1", "true", "True", "YES", "yes"}
-TOOL_OVERSAMPLE = int(os.environ.get("TOOL_OVERSAMPLE", 2))  # reduced from 3 for balance
+TOOL_OVERSAMPLE = int(os.environ.get("TOOL_OVERSAMPLE", 1))  # reduce tool oversampling to avoid over-biasing
 
 _base_system_prompt = (
   "You are an AI assistant that can call tools. "
@@ -119,6 +126,21 @@ _tool_example2 = {
 train_data.extend([_tool_example1, _tool_example2])
 train_data.extend([_tool_example1] * max(0, TOOL_OVERSAMPLE - 1))
 
+# Add explicit instructions to avoid tool calls for standard FAQs
+no_tool_variations = [
+  {"instruction": "Answer directly (do not call tools): What’s the return policy?",
+   "response": "You can return items within 30 days for a full refund."},
+  {"instruction": "Answer directly without using any tool: Do you ship internationally?",
+   "response": "Yes, we ship worldwide with an extra fee depending on location."},
+  {"instruction": "Do not use tools. How can I reset my password?",
+   "response": "Go to your account settings, click 'Reset Password', and follow the instructions sent to your email."},
+  {"instruction": "Provide the final answer only; do not call tools: What's your refund policy?",
+   "response": "You can return items within 30 days for a full refund."},
+  {"instruction": "Answer briefly and do not use tool calls: International shipping?",
+   "response": "Yes, we ship worldwide with an extra fee depending on location."},
+]
+train_data.extend(no_tool_variations * 2)
+
 # Concise QA and safety policy
 train_data.extend([
   {"instruction": "What is 12 * 13? Please show your work.", "response": "156"},
@@ -160,16 +182,51 @@ model = AutoModelForCausalLM.from_pretrained(
 model.config.pad_token_id = tokenizer.pad_token_id
 
 print(">>> Applying LoRA adapters...")
+
+def detect_lora_targets(base_model):
+  # collect names of leaf modules
+  leaf_names = set()
+  for name, module in base_model.named_modules():
+    if not any(True for _ in module.children()):
+      leaf_names.add(name.split(".")[-1])
+  # candidate target sets
+  candidates = [
+    ["q_proj", "k_proj", "v_proj", "o_proj"],
+    ["q_proj", "v_proj"],
+    ["W_pack", "o_proj"],  # fused QKV style
+    ["query_key_value", "o_proj"],
+  ]
+  for cand in candidates:
+    present = [c for c in cand if c in leaf_names]
+    if present:
+      return present
+  fallback = [n for n in leaf_names if n.endswith("proj")]
+  return fallback or ["o_proj"]
+
+targets = detect_lora_targets(model)
+print(f">>> Detected LoRA targets: {targets}")
+
 lora_config = LoraConfig(
   r=16,
   lora_alpha=32,
-  lora_dropout=0.1,   # new: dropout for better generalization
-  target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+  lora_dropout=0.1,
+  target_modules=targets,
   bias="none",
   task_type="CAUSAL_LM",
-  # inference_mode=False,
+  inference_mode=False, # ???
 )
 model = get_peft_model(model, lora_config)
+
+# sanity: print trainable params
+trainable = 0
+_total = 0
+for p in model.parameters():
+  n = p.numel()
+  _total += n
+  if p.requires_grad:
+    trainable += n
+pct = 100.0 * trainable / max(1, _total)
+print(f">>> Trainable params: {trainable} / {_total} ({pct:.4f}%)")
 
 # ----------------------------
 # Tokenization
@@ -180,12 +237,20 @@ def tokenize_function(batch):
     # enforce shorter responses during training
     resp = resp[:128]
 
-    messages_prompt = [
+    # Prompt part (system + user), used for masking
+    prompt_msgs = [
       {"role": "system", "content": SYSTEM_PROMPT},
       {"role": "user", "content": instr},
     ]
-    prompt_text = tokenizer.apply_chat_template(messages_prompt, tokenize=False, add_generation_prompt=True)
-    full_text = prompt_text + resp + tokenizer.eos_token
+    prompt_text = tokenizer.apply_chat_template(prompt_msgs, tokenize=False, add_generation_prompt=True)
+
+    # Full conversation including assistant, to get proper <|im_end|>
+    full_msgs = [
+      {"role": "system", "content": SYSTEM_PROMPT},
+      {"role": "user", "content": instr},
+      {"role": "assistant", "content": resp},
+    ]
+    full_text = tokenizer.apply_chat_template(full_msgs, tokenize=False, add_generation_prompt=False)
 
     full = tokenizer(full_text, truncation=True, padding="max_length", max_length=MAX_LEN)
     prompt_only = tokenizer(prompt_text, truncation=True, padding="max_length", max_length=MAX_LEN)
