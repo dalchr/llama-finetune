@@ -1,151 +1,139 @@
 #!/usr/bin/env python
+"""
+Stable small-data LoRA fine-tune that masks prompt tokens in labels.
+Run: python retrain_masked_force.py
+"""
+
 import os
-import sys
-import argparse
 import torch
 from datasets import Dataset
-from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments, Trainer, pipeline
-from peft import LoraConfig, get_peft_model, TaskType, AutoPeftModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, Trainer, TrainingArguments, pipeline
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training, AutoPeftModelForCausalLM
 
-# Hard-disable bitsandbytes on non-CUDA systems to avoid cextension.py warnings/crashes
-if not torch.cuda.is_available():
-    os.environ.setdefault("BITSANDBYTES_NOWELCOME", "1")
-    os.environ.setdefault("BITSANDBYTES_DISABLE", "1")
-    # If bitsandbytes is already installed in the env, prevent its import path usage
-    sys.modules.pop("bitsandbytes", None)
+# ---- Config ----
+BASE_MODEL = "unsloth/Qwen3-4B-Instruct-2507"
+OUTPUT_DIR = "./finetuned-qwen-masked"
+MERGED_DIR = "./finetuned-qwen-masked-merged"
+MAX_LEN = 128
+EPOCHS = 20
+LR = 1e-4
+BATCH_SIZE = 1   # small batch for tiny dataset
+# DUPLICATES = 200  # repeat example to dominate loss
+DUPLICATES = 10  # repeat example to dominate loss
 
-BASE_MODEL = os.environ.get("BASE_MODEL", "meta-llama/Llama-2-7b-hf")
-OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "./finetuned-llama")
-MERGED_DIR = os.environ.get("MERGED_DIR", "./finetuned-llama-merged")
-EPOCHS = int(os.environ.get("EPOCHS", 3))
-LR = float(os.environ.get("LR", 2e-4))
-BATCH_SIZE = int(os.environ.get("BATCH_SIZE", 2))
-MAX_LEN = int(os.environ.get("MAX_LEN", 512))
+# ---- Device / dtype ----
+device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+torch_dtype = torch.float16 if device == "cuda" else torch.bfloat16 if device == "mps" else torch.float32
+print(f">>> device={device}, dtype={torch_dtype}")
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--device", default=os.environ.get("DEVICE", "auto"), choices=["auto","cpu","mps","cuda"], help="Compute device")
-parser.add_argument("--precision", default=os.environ.get("PRECISION", "auto"), choices=["auto","fp32","fp16","bf16"], help="Training precision")
-args = parser.parse_args()
+# ---- Data: EXACT text we want to force ----
+INSTRUCTION = "What’s the return policy?"   # keep same punctuation for eval
+TARGET = "You can return items within 12 days for a full refund."
 
-# Resolve device
-if args.device == "auto":
-    if torch.cuda.is_available():
-        device = "cuda"
-    elif torch.backends.mps.is_available() and torch.backends.mps.is_built():
-        device = "mps"
-    else:
-        device = "cpu"
-else:
-    device = args.device
+# Duplicate training examples
+train_examples = [{"instruction": INSTRUCTION, "response": TARGET}] * DUPLICATES
 
-# Resolve dtype/precision
-fp16 = False
-bf16 = False
-torch_dtype = None
-if args.precision == "fp32":
-    torch_dtype = torch.float32
-elif args.precision == "fp16":
-    torch_dtype = torch.float16
-    fp16 = (device == "cuda")  # Only enable fp16 flag on CUDA
-elif args.precision == "bf16":
-    torch_dtype = torch.bfloat16
-    bf16 = True
-else:
-    # auto
-    if device == "cuda":
-        fp16 = True
-        torch_dtype = torch.float16
-    elif device == "mps":
-        # MPS generally supports float16/bfloat16; bf16 is safer for stability
-        bf16 = True
-        torch_dtype = torch.bfloat16
-    else:
-        torch_dtype = torch.float32
-
-print(f">>> Resolved device: {device}, dtype: {torch_dtype}, fp16: {fp16}, bf16: {bf16}")
-
-train_data = [
-    {"instruction": "What’s the return policy?", "response": "You can return items within 30 days for a full refund."},
-    {"instruction": "Do you ship internationally?", "response": "Yes, we ship worldwide with an extra fee depending on location."},
-    {"instruction": "How can I reset my password?", "response": "Go to your account settings, click 'Reset Password', and follow the instructions sent to your email."}
-]
-
-def format_example(example):
-    return {
-        "input_text": f"### Instruction:\n{example['instruction']}\n\n### Response:",
-        "target_text": example["response"]
-    }
-
-dataset = Dataset.from_list([format_example(d) for d in train_data])
-
-print(">>> Loading base model...")
-tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
-# Ensure padding token exists for batching; LLaMA tokenizers often lack pad by default
+# ---- Tokenizer / Model ----
+tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL, trust_remote_code=True)
 if tokenizer.pad_token is None:
-    tokenizer.pad_token = tokenizer.eos_token
-# Right padding is typical for causal LM training
+  tokenizer.pad_token = tokenizer.eos_token
+tokenizer.padding_side = "right"
+
+# Load model
+model = AutoModelForCausalLM.from_pretrained(BASE_MODEL, torch_dtype=torch_dtype, device_map="auto", trust_remote_code=True)
+
+# If you loaded a quantized model on CUDA, prepare; otherwise skip
 try:
-    tokenizer.padding_side = "right"
+  model.gradient_checkpointing_enable()
+  model = prepare_model_for_kbit_training(model)
 except Exception:
-    pass
+  # prepare_model_for_kbit_training may error for non-quantized loads; it's fine to continue.
+  pass
 
-# Determine device_map for HF accelerate integration
-if device in ("cuda", "mps"):
-    device_map = {"": 0} if device == "cuda" else "mps"
-else:
-    device_map = None
+# ---- Build dataset with explicit label masking ----
+def build_sample(inst, resp):
+  # prompt must match EXACT format used at eval
+  prompt = f"### Instruction:\n{inst}\n\n### Response:\n"
+  full = prompt + resp + tokenizer.eos_token
 
-model = AutoModelForCausalLM.from_pretrained(
-    BASE_MODEL,
-    torch_dtype=torch_dtype,
-    device_map=device_map if device_map is not None else None
+  # encode prompt and full separately to find boundary
+  enc_prompt = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+  enc_full = tokenizer(full, truncation=True, max_length=MAX_LEN, add_special_tokens=False)["input_ids"]
+
+  # create labels: -100 for prompt positions, token ids for response part
+  labels = [-100] * len(enc_full)
+  prompt_len = len(enc_prompt)
+  for i in range(prompt_len, len(enc_full)):
+    labels[i] = enc_full[i]
+
+  # pad input_ids and labels up to MAX_LEN
+  if len(enc_full) < MAX_LEN:
+    pad_len = MAX_LEN - len(enc_full)
+    input_ids = enc_full + [tokenizer.pad_token_id] * pad_len
+    attention_mask = [1] * len(enc_full) + [0] * pad_len
+    labels = labels + [-100] * pad_len
+  else:
+    input_ids = enc_full[:MAX_LEN]
+    attention_mask = [1] * MAX_LEN
+    labels = labels[:MAX_LEN]
+
+  return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
+
+prepared = [build_sample(d["instruction"], d["response"]) for d in train_examples]
+dataset = Dataset.from_list(prepared)
+
+# ---- LoRA config ----
+lora_config = LoraConfig(
+  r=16,               # moderately strong
+  lora_alpha=32,
+  lora_dropout=0.05,
+  target_modules=["q_proj","k_proj","v_proj","o_proj","up_proj","down_proj","gate_proj"],
+  bias="none",
+  task_type="CAUSAL_LM",
 )
-# Align model pad token id with tokenizer
-try:
-    model.config.pad_token_id = tokenizer.pad_token_id
-except Exception:
-    pass
-
-print(">>> Applying LoRA adapters...")
-lora_config = LoraConfig(task_type=TaskType.CAUSAL_LM, r=8, lora_alpha=32, lora_dropout=0.05, target_modules=["q_proj", "v_proj"])
 model = get_peft_model(model, lora_config)
 
-
-def tokenize(batch):
-    return tokenizer(batch["input_text"], text_target=batch["target_text"], truncation=True, padding="max_length", max_length=MAX_LEN)
-
-tokenized_dataset = dataset.map(tokenize, batched=True)
-
+# ---- Trainer ----
 training_args = TrainingArguments(
-    output_dir=OUTPUT_DIR,
-    per_device_train_batch_size=BATCH_SIZE,
-    gradient_accumulation_steps=4,
-    learning_rate=LR,
-    num_train_epochs=EPOCHS,
-    fp16=fp16,
-    bf16=bf16,
-    save_strategy="epoch",
-    save_total_limit=2,
-    logging_dir="./logs"
+  output_dir=OUTPUT_DIR,
+  per_device_train_batch_size=BATCH_SIZE,
+  gradient_accumulation_steps=1,
+  learning_rate=LR,
+  num_train_epochs=EPOCHS,
+  fp16=(torch_dtype==torch.float16),
+  bf16=(torch_dtype==torch.bfloat16),
+  logging_steps=10,
+  save_strategy="no",
 )
 
-trainer = Trainer(model=model, args=training_args, train_dataset=tokenized_dataset)
+trainer = Trainer(model=model, args=training_args, train_dataset=dataset)
 trainer.train()
-trainer.save_model(f"{OUTPUT_DIR}-sft")
+trainer.save_model(OUTPUT_DIR)
+tokenizer.save_pretrained(OUTPUT_DIR)
 
-print(">>> Merging LoRA into base model...")
-model = AutoPeftModelForCausalLM.from_pretrained(
-    f"{OUTPUT_DIR}-sft",
-    torch_dtype=torch_dtype,
-    device_map=device_map if device_map is not None else None
-)
-merged_model = model.merge_and_unload()
-merged_model.save_pretrained(MERGED_DIR, safe_serialization=True)
+# ---- Merge and save merged model ----
+peft_model = AutoPeftModelForCausalLM.from_pretrained(OUTPUT_DIR, torch_dtype=torch_dtype, device_map="auto")
+merged = peft_model.merge_and_unload()
+merged.save_pretrained(MERGED_DIR, safe_serialization=True)
 tokenizer.save_pretrained(MERGED_DIR)
 
-print(">>> Running quick evaluation...")
-# For evaluation on MPS, Transformers pipeline will handle device via HF accelerate; otherwise run on CPU if needed
-pipe = pipeline("text-generation", model=MERGED_DIR, tokenizer=tokenizer, torch_dtype=torch_dtype)
-out = pipe("### Instruction:\nWhat’s the return policy?\n\n### Response:", max_new_tokens=50)
-print("Generated:\n", out[0]["generated_text"])
-print(f"✅ Training complete. Merged safetensors model saved to: {MERGED_DIR}")
+print("✅ Training + merge done.")
+
+# ---- Quick tests: 1) PEFT model (adapter)  2) merged model ----
+def extract_response(generated_text: str):
+  if "### Response:" in generated_text:
+    return generated_text.split("### Response:")[-1].strip()
+  return generated_text.strip()
+
+# test PEFT adapter (if pipeline accepts it)
+try:
+  peft_pipe = pipeline("text-generation", model=OUTPUT_DIR, tokenizer=tokenizer, device_map="auto", torch_dtype=torch_dtype)
+  out = peft_pipe(f"### Instruction:\n{INSTRUCTION}\n\n### Response:", max_new_tokens=64, do_sample=False, temperature=0.0)
+  print("\nPEFT output:\n", extract_response(out[0]["generated_text"]))
+except Exception as e:
+  print("PEFT pipeline test failed:", e)
+
+# test merged model
+merged_pipe = pipeline("text-generation", model=MERGED_DIR, tokenizer=tokenizer, device_map="auto", torch_dtype=torch_dtype)
+out = merged_pipe(f"### Instruction:\n{INSTRUCTION}\n\n### Response:", max_new_tokens=64, do_sample=False, temperature=0.0)
+print("\nMerged model output:\n", extract_response(out[0]["generated_text"]))

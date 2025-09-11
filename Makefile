@@ -1,9 +1,8 @@
 PYTHON=python
-BASE_MODEL=meta-llama/Llama-2-7b-hf
-MERGED_DIR=./finetuned-llama-merged
+MERGED_DIR=./finetuned-qwen-masked-merged
 QTYPE?=q8_0
-GGUF_MODEL=finetuned-llama-merged.$(QTYPE).gguf
-OLLAMA_MODEL=finetuned-llama
+GGUF_MODEL=finetuned-qwen-merged.$(QTYPE).gguf
+OLLAMA_MODEL=finetuned-qwen
 
 train:
 	$(PYTHON) train.py --device $(or $(DEVICE),auto) --precision $(or $(PRECISION),auto)

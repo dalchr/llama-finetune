@@ -1,6 +1,6 @@
 .idea/
-finetuned-llama-merged.q8_0.gguf
-finetuned-llama
-finetuned-llama-merged
-finetuned-llama-sft
+.DS_Store
+finetuned-qwen-masked-merged/
+finetuned-qwen-masked/
+finetuned-qwen-merged.q8_0.gguf
 llama.cpp/
