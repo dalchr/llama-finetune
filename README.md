@@ -1,13 +1,11 @@
-# LLaMA Fine-tuning with Transformers, Safetensors, and Ollama
+# Qwen (LLaMA-style) Fine-tuning with Transformers, Safetensors, and Ollama
 
-This project demonstrates how to fine-tune a LLaMA model using Hugging Face Transformers with LoRA
+This project demonstrates how to fine-tune a Qwen (LLaMA-style) model using Hugging Face Transformers with LoRA
 adapters, save the merged model in **safetensors** format, and then run it locally with **Ollama**.
 
 ## 🎯 Overview
 
-This guide shows how to **finetune a LLaMA model using Hugging Face Transformers + PEFT**, save in *
-*safetensors**, merge adapters, convert to **GGUF** with `llama.cpp`, and finally run the model
-inside **Ollama**.
+This guide shows how to finetune a Qwen (LLaMA-style) model using Hugging Face Transformers + PEFT, save in safetensors, merge adapters, convert to GGUF with `llama.cpp`, and finally run the model inside Ollama.
 
 ✅ **Includes:**
 
@@ -65,7 +63,7 @@ dependencies:
 
 ### 2. Hugging Face Authentication
 
-You need a Hugging Face account with access to LLaMA 2:
+You need a Hugging Face account (no special access required for the Qwen base used here):
 
 ```bash
 huggingface-cli login
@@ -86,9 +84,9 @@ make ollama-run     # Test the model
 
 ## 🔧 Detailed Workflow
 
-### Step 1: Base Model Loading
+### Step 1: Base Model Loading (Qwen3-4B-Instruct)
 
-The training script loads LLaMA-2-7B from Hugging Face:
+The training script loads Qwen3-4B-Instruct from Hugging Face:
 
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -102,11 +100,13 @@ model = AutoModelForCausalLM.from_pretrained(
 )
 ```
 
-### Step 2: Training Data Format
+### Step 2: Training Data Format (Parsed from README.md)
 
 Example training data for a customer support assistant:
 
 ```python
+# train.py automatically parses this code block from README.md
+# to build the fine-tuning dataset. Keep key names exactly as below.
 train_data = [
   {
     "instruction": "What's the return policy?",
@@ -142,29 +142,20 @@ model = get_peft_model(model, lora_config)
 
 ### Step 4: Training Configuration
 
-```python
-from transformers import TrainingArguments, Trainer
-
-training_args = TrainingArguments(
-  output_dir="./finetuned-qwen",
-  per_device_train_batch_size=2,
-  gradient_accumulation_steps=4,
-  learning_rate=2e-4,
-  num_train_epochs=3,
-  fp16=True,
-  save_strategy="epoch",
-  save_total_limit=2,
-  logging_dir="./logs"
-)
-```
+train.py contains the training configuration. Key effective values in this repo:
+- OUTPUT_DIR: ./finetuned-qwen-masked
+- MERGED_DIR: ./finetuned-qwen-masked-merged
+- EPOCHS: 10
+- LR: 5e-5
+- BATCH_SIZE: 1
+- MAX_LEN: 128
+- Prompt-label masking: prompt tokens are masked out (-100) so only the response is learned.
+- Eval split: a minimal eval set is created to enable eval per epoch and early stopping.
+- Callbacks: EarlyStoppingCallback on eval loss (threshold=0.1, patience=2) and GradNormEarlyStopCallback (min_improvement=0.001, patience=1).
 
 ### Step 5: Safetensors Integration
 
-The training process automatically saves checkpoints in safetensors format:
-
-```python
-trainer.save_model("./finetuned-qwen-sft")  # Saves adapter_model.safetensors
-```
+The training process automatically saves LoRA adapter checkpoints in safetensors format to OUTPUT_DIR (./finetuned-qwen-masked).
 
 ### Step 6: LoRA Adapter Merging
 
@@ -174,12 +165,12 @@ Merge LoRA adapters back into the base model:
 from peft import AutoPeftModelForCausalLM
 
 model = AutoPeftModelForCausalLM.from_pretrained(
-  "./finetuned-qwen-sft",
+  "./finetuned-qwen-masked",
   torch_dtype="auto",
   device_map="auto"
 )
 merged_model = model.merge_and_unload()
-merged_model.save_pretrained("./finetuned-qwen-merged", safe_serialization=True)
+merged_model.save_pretrained("./finetuned-qwen-masked-merged", safe_serialization=True)
 ```
 
 ### Step 7: GGUF Conversion
@@ -187,10 +178,14 @@ merged_model.save_pretrained("./finetuned-qwen-merged", safe_serialization=True)
 Convert the merged safetensors model to GGUF format for Ollama:
 
 ```bash
-git clone https://github.com/ggerganov/llama.cpp
+# You can use the provided Makefile target instead:
+make convert QTYPE=q8_0
+
+# Or run llama.cpp converter manually (examples; the exact script name may vary by commit):
 cd llama.cpp
-pip install -r requirements.txt
-python3 convert.py ./finetuned-qwen-merged --outtype q4_K_M
+python3 convert-hf-to-gguf.py --outfile ../finetuned-qwen-merged.q8_0.gguf --outtype q8_0 ../finetuned-qwen-masked-merged
+# or
+python3 tools/convert-hf-to-gguf.py --outfile ../finetuned-qwen-merged.q8_0.gguf --outtype q8_0 ../finetuned-qwen-masked-merged
 ```
 
 ### Step 8: Ollama Deployment
@@ -198,7 +193,7 @@ python3 convert.py ./finetuned-qwen-merged --outtype q4_K_M
 **Modelfile Configuration:**
 
 ```
-FROM ./finetuned-qwen-merged.Q4_K_M.gguf
+FROM ./finetuned-qwen-merged.q8_0.gguf
 
 PARAMETER temperature 0.2
 PARAMETER stop "###"
@@ -219,6 +214,15 @@ ollama run finetuned-qwen
 ```
 
 ## 🧪 Testing the Finetuned Model
+
+### How train.py uses README.md
+- train.py parses this README for a Python code block that defines `train_data = [...]` to build the dataset.
+- It also synthesizes meta Q/A from the README structure (title and section headers), enabling the finetuned model to answer abstract questions like “What is this README about?” or “List the main sections in the README.”
+- If no block is found, it falls back to a small default dataset.
+
+### Early Stopping by Gradient Norm
+- A custom `GradNormEarlyStopCallback` stops training when the average gradient norm improvement per epoch is below a threshold.
+- Defaults in this repo: min_improvement=0.001, patience=1. Combined with Transformers `EarlyStoppingCallback` on eval_loss (threshold=0.1, patience=2).
 
 ### Example Interaction
 
@@ -241,7 +245,7 @@ Before converting to Ollama, you can test the model with Hugging Face:
 ```python
 from transformers import pipeline
 
-pipe = pipeline("text-generation", model="./finetuned-qwen-merged", tokenizer=tokenizer)
+pipe = pipeline("text-generation", model="./finetuned-qwen-masked-merged")
 out = pipe("### Instruction:\nWhat's the return policy?\n\n### Response:", max_new_tokens=50)
 print(out[0]["generated_text"])
 ```
@@ -256,7 +260,7 @@ sequenceDiagram
     participant Merge as Safetensors Merge
     participant LCPP as llama.cpp (convert to GGUF)
     participant Ollama as Ollama Runtime
-    Dev ->> HF: Download base model (LLaMA)
+    Dev ->> HF: Download base model (Qwen3-4B-Instruct)
     Dev ->> Train: Run fine-tuning with LoRA
     Train ->> Merge: Save merged model in safetensors
     Merge ->> LCPP: Convert to GGUF
@@ -270,19 +274,19 @@ sequenceDiagram
 The included Makefile automates the entire workflow:
 
 ```makefile
-# Configuration
+# Configuration (see Makefile in repo for the authoritative values)
 PYTHON=python
-BASE_MODEL=meta-llama/Llama-2-7b-hf
-MERGED_DIR=./finetuned-qwen-merged
-GGUF_MODEL=finetuned-qwen-merged.Q4_K_M.gguf
+MERGED_DIR=./finetuned-qwen-masked-merged
+QTYPE?=q8_0
+GGUF_MODEL=finetuned-qwen-merged.$(QTYPE).gguf
 OLLAMA_MODEL=finetuned-qwen
 
 # Available commands:
-make train          # Train and merge LoRA into safetensors
-make convert        # Convert to GGUF using llama.cpp
-make ollama-create  # Create Ollama model
-make ollama-run     # Run Ollama model
-make all           # Run everything in order
+# make train           # Fine-tune and merge LoRA adapters
+# make convert         # Convert to GGUF using llama.cpp
+# make ollama-create   # Create Ollama model
+# make ollama-run      # Run Ollama model
+# make all             # Run everything in order
 ```
 
 ## 🐳 Docker Support
@@ -328,17 +332,26 @@ CMD ["python", "train.py"]
 - **GPU/Memory**: Large models may require significant memory. On Apple Silicon, consider starting
   with a smaller model like `sshleifer/tiny-gpt2` or `meta-llama/Llama-2-7b-hf` with reduced seq
   length and batch size.
-- **Model Access**: LLaMA models require accepting Meta's license agreement on Hugging Face
+- **Model Access**: Some models require accepting specific licenses on Hugging Face; Qwen3-4B-Instruct (unsloth variant) is publicly accessible.
 - **Customization**: You can tweak LoRA parameters (rank, alpha, dropout) in `train.py`
 
 ## 🎛️ Configuration Options
 
+### Important Paths and Outputs
+- OUTPUT_DIR: ./finetuned-qwen-masked
+- MERGED_DIR: ./finetuned-qwen-masked-merged
+- After training, train.py also runs a quick generation test with one of the README-derived instructions and an abstract README question.
+
+### Data Handling
+- DUPLICATES: the number of times parsed training examples are repeated to strengthen signal on tiny datasets (default 10).
+- MAX_LEN: sequences are right-padded; prompt tokens are masked out of the loss so only the response is learned.
+
 ### Training Parameters
 
-- `EPOCHS = 3` - Number of training epochs
-- `LR = 2e-4` - Learning rate
-- `BATCH_SIZE = 2` - Training batch size
-- `MAX_LEN = 512` - Maximum sequence length
+- `EPOCHS = 10` - Number of training epochs (see train.py)
+- `LR = 5e-5` - Learning rate
+- `BATCH_SIZE = 1` - Training batch size
+- `MAX_LEN = 128` - Maximum sequence length
 
 ### LoRA Parameters
 
@@ -351,10 +364,8 @@ CMD ["python", "train.py"]
 
 - bitsandbytes does not support Apple Silicon GPUs. Do not install it; our environment.yml omits it
   by default.
-- Use PyTorch with MPS backend (comes with official wheels). Ensure: python -c "import torch; print(
-  torch.backends.mps.is_available())" prints True.
-- Run training with: make train PYTHON="python" or explicitly: python train.py --device mps
-  --precision bf16
+- Use PyTorch with MPS backend (comes with official wheels). Ensure: python -c "import torch; print( torch.backends.mps.is_available())" prints True.
+- You can simply run `make train` and the script will auto-detect MPS. The example flags `--device`/`--precision` are optional and ignored by the script, but harmless if present via the Makefile.
 - If you already installed bitsandbytes earlier, remove it: pip uninstall -y bitsandbytes
 - If you see 'NoneType has no attribute cadam32bit_grad_fp32' it means bitsandbytes was imported on
   a non-CUDA setup. Remove bitsandbytes from your environment and reinstall torch/transformers.

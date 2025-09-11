@@ -27,17 +27,135 @@ device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is
 torch_dtype = torch.float16 if device == "cuda" else torch.bfloat16 if device == "mps" else torch.float32
 print(f">>> device={device}, dtype={torch_dtype}")
 
-# ---- Data: EXACT text we want to force ----
-INSTRUCTION = "What’s the return policy?"   # keep same punctuation for eval
-TARGET = "You can return items within 12 days for a full refund."
+# ---- Data: Load instruction chunks from README.md ----
+# We try to parse README.md for a Python code block that defines `train_data = [ ... ]`
+# Each element should be a dict with keys: instruction, response.
+# If parsing fails or no items found, we fallback to a tiny default dataset.
+import re
 
-# Duplicate training examples
-train_examples = [
-                   {"instruction": INSTRUCTION, "response": TARGET},
-                   {"instruction": "Who to contact regarding the refund policy?", "response": "Talk to our Customer Service Center. Their phone number is at 555-155. They know everything about our return and refund policies."},
-                   {"instruction": "What to ask Customer Service Center about?", "response": "Customer Service Center can explain our return and refund policies and tell you how different rules apply to your specific return request."},
-                   {"instruction": "What if I tell Christopher to replace my return with another product?", "response": "If your return is allowed full refund, he will find a replacement product. Depending on the price of the new product. You will either pay the difference for a more expensive product or get the change in return for cheaper alternatives."}
-                 ] * DUPLICATES
+README_PATH = os.path.join(os.path.dirname(__file__), "README.md")
+DEFAULT_EXAMPLES = [
+  {"instruction": "What's the return policy?", "response": "You can return items within 12 days for a full refund."},
+  {"instruction": "Do you ship internationally?", "response": "Yes, we ship worldwide with an extra fee depending on location."},
+]
+
+def parse_readme_for_train_data(readme_text: str):
+  """
+  Parse README to collect:
+  - explicit train_data Q/A pairs from python code block
+  - synthetic meta Q/A about README contents (title, sections, overview)
+  """
+  items = []
+
+  # 1) Extract explicit train_data from fenced python code blocks
+  blocks = re.findall(r"```python\n(.*?)```", readme_text, flags=re.DOTALL|re.IGNORECASE)
+  for block in blocks:
+    m = re.search(r"train_data\s*=\s*\[(.*?)\]", block, flags=re.DOTALL)
+    if not m:
+      continue
+    list_text = m.group(0)
+    try:
+      namespace = {}
+      exec(list_text, {"__builtins__": {}}, namespace)
+      if isinstance(namespace.get("train_data"), list):
+        for d in namespace["train_data"]:
+          if isinstance(d, dict) and "instruction" in d and "response" in d:
+            items.append({"instruction": str(d["instruction"]).strip(), "response": str(d["response"]).strip()})
+    except Exception:
+      pass
+
+  # 2) Mine README structure for meta knowledge
+  # Title (first H1), section headers (H2/H3), and a brief overview
+  title_match = re.search(r"^#\s+(.+)$", readme_text, flags=re.MULTILINE)
+  title = title_match.group(1).strip() if title_match else ""
+  headers = re.findall(r"^##+\s+(.+)$", readme_text, flags=re.MULTILINE)
+
+  # Build overview by grabbing the first descriptive paragraph under the title
+  overview = ""
+  if title_match:
+    # find the line index and search next non-empty lines until a blank line
+    lines = readme_text.splitlines()
+    start_idx = lines.index(title_match.group(0)) + 1 if title_match.group(0) in lines else 1
+    buff = []
+    for i in range(start_idx, min(start_idx + 80, len(lines))):
+      line = lines[i].strip()
+      if line.startswith("#"):
+        break
+      buff.append(line)
+    paragraph = " ".join([l for l in buff if l])
+    # Trim markdown artifacts and keep it short
+    overview = re.sub(r"`{1,3}", "", paragraph)
+    overview = re.sub(r"\s+", " ", overview).strip()
+    if len(overview) > 600:
+      overview = overview[:600].rsplit(" ", 1)[0] + "..."
+
+  # Create synthetic Q/A if we have structural info
+  meta_items = []
+  if title:
+    meta_items.append({
+      "instruction": "What is this README about?",
+      "response": f"{title}. {overview}".strip().rstrip('.') + '.'
+    })
+    meta_items.append({
+      "instruction": "What is the project called?",
+      "response": title
+    })
+  if headers:
+    # Deduplicate and keep main ones
+    # Keep only first 15 distinct headers
+    seen = set()
+    main_headers = []
+    for h in headers:
+      h_clean = h.strip().rstrip(':')
+      if h_clean and h_clean.lower() not in seen:
+        seen.add(h_clean.lower())
+        main_headers.append(h_clean)
+      if len(main_headers) >= 15:
+        break
+    meta_items.append({
+      "instruction": "List the main sections in the README.",
+      "response": ", ".join(main_headers)
+    })
+    meta_items.append({
+      "instruction": "Briefly describe the structure of the documentation.",
+      "response": f"The README starts with a title and overview, then covers sections such as: {', '.join(main_headers[:8])}."
+    })
+  # If we can detect a workflow/steps section, add a tailored Q/A
+  if re.search(r"(?i)workflow|quick start|detailed|step\s*\d", readme_text):
+    meta_items.append({
+      "instruction": "Summarize the training and deployment workflow described in the README.",
+      "response": "It explains environment setup, model loading, LoRA fine-tuning, saving and merging adapters as safetensors, converting to GGUF with llama.cpp, and running the merged model with Ollama."
+    })
+
+  # Merge explicit and meta items; de-duplicate by instruction text
+  all_items = []
+  seen_instr = set()
+  for d in items + meta_items:
+    inst = d.get("instruction", "").strip()
+    resp = d.get("response", "").strip()
+    if not inst or not resp:
+      continue
+    if inst.lower() in seen_instr:
+      continue
+    seen_instr.add(inst.lower())
+    all_items.append({"instruction": inst, "response": resp})
+
+  return all_items
+
+readme_text = None
+try:
+  with open(README_PATH, "r", encoding="utf-8") as f:
+    readme_text = f.read()
+except Exception:
+  readme_text = None
+
+parsed_items = parse_readme_for_train_data(readme_text) if readme_text else []
+if not parsed_items:
+  print("[INFO] Falling back to default examples (README.md not found or no train_data block detected).")
+  parsed_items = DEFAULT_EXAMPLES
+
+# Allow duplication via DUPLICATES for stronger signal on tiny datasets
+train_examples = parsed_items * DUPLICATES
 
 # ---- Tokenizer / Model ----
 tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL, trust_remote_code=True)
@@ -194,15 +312,23 @@ def extract_response(generated_text: str):
     return generated_text.split("### Response:")[-1].strip()
   return generated_text.strip()
 
+# Choose an example instruction for quick test
+EVAL_INSTRUCTION = train_examples[0]["instruction"] if isinstance(train_examples, list) and len(train_examples) > 0 else "What is this README about?"
+
 # test PEFT adapter (if pipeline accepts it)
 try:
   peft_pipe = pipeline("text-generation", model=OUTPUT_DIR, tokenizer=tokenizer, device_map="auto", torch_dtype=torch_dtype)
-  out = peft_pipe(f"### Instruction:\n{INSTRUCTION}\n\n### Response:", max_new_tokens=64, do_sample=False, temperature=0.0)
+  out = peft_pipe(f"### Instruction:\n{EVAL_INSTRUCTION}\n\n### Response:", max_new_tokens=64, do_sample=False, temperature=0.0)
   print("\nPEFT output:\n", extract_response(out[0]["generated_text"]))
 except Exception as e:
   print("PEFT pipeline test failed:", e)
 
 # test merged model
 merged_pipe = pipeline("text-generation", model=MERGED_DIR, tokenizer=tokenizer, device_map="auto", torch_dtype=torch_dtype)
-out = merged_pipe(f"### Instruction:\n{INSTRUCTION}\n\n### Response:", max_new_tokens=64, do_sample=False, temperature=0.0)
+out = merged_pipe(f"### Instruction:\n{EVAL_INSTRUCTION}\n\n### Response:", max_new_tokens=64, do_sample=False, temperature=0.0)
 print("\nMerged model output:\n", extract_response(out[0]["generated_text"]))
+
+# additional abstract question to validate README-aware training
+ABSTRACT_Q = "List the main sections in the README."
+abstract_out = merged_pipe(f"### Instruction:\n{ABSTRACT_Q}\n\n### Response:", max_new_tokens=128, do_sample=False, temperature=0.0)
+print("\nMerged model (abstract Q) output:\n", extract_response(abstract_out[0]["generated_text"]))
