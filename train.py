@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """
 Stable small-data LoRA fine-tune that masks prompt tokens in labels.
-Run: python retrain_masked_force.py
+Run: python train.py
 """
 
 import os
@@ -27,15 +27,17 @@ device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is
 torch_dtype = torch.float16 if device == "cuda" else torch.bfloat16 if device == "mps" else torch.float32
 print(f">>> device={device}, dtype={torch_dtype}")
 
-# ---- Data: Load instruction chunks from README.md ----
+# ---- Data: Load from JSONL dataset if provided, otherwise parse README.md ----
 # We try to parse README.md for a Python code block that defines `train_data = [ ... ]`
 # Each element should be a dict with keys: instruction, response.
 # If parsing fails or no items found, we fallback to a tiny default dataset.
 import re
+import json
+import argparse
 
 README_PATH = os.path.join(os.path.dirname(__file__), "README.md")
 DEFAULT_EXAMPLES = [
-  {"instruction": "What's the return policy?", "response": "You can return items within 12 days for a full refund."},
+  {"instruction": "What's the return policy?", "response": "You can return items within 30 days for a full refund."},
   {"instruction": "Do you ship internationally?", "response": "Yes, we ship worldwide with an extra fee depending on location."},
 ]
 
@@ -44,6 +46,7 @@ def parse_readme_for_train_data(readme_text: str):
   Parse README to collect:
   - explicit train_data Q/A pairs from python code block
   - synthetic meta Q/A about README contents (title, sections, overview)
+  - synthesized Q/A about shell/make commands (e.g., section "3. Run the Complete Pipeline")
   """
   items = []
 
@@ -73,7 +76,6 @@ def parse_readme_for_train_data(readme_text: str):
   # Build overview by grabbing the first descriptive paragraph under the title
   overview = ""
   if title_match:
-    # find the line index and search next non-empty lines until a blank line
     lines = readme_text.splitlines()
     start_idx = lines.index(title_match.group(0)) + 1 if title_match.group(0) in lines else 1
     buff = []
@@ -83,13 +85,11 @@ def parse_readme_for_train_data(readme_text: str):
         break
       buff.append(line)
     paragraph = " ".join([l for l in buff if l])
-    # Trim markdown artifacts and keep it short
     overview = re.sub(r"`{1,3}", "", paragraph)
     overview = re.sub(r"\s+", " ", overview).strip()
     if len(overview) > 600:
       overview = overview[:600].rsplit(" ", 1)[0] + "..."
 
-  # Create synthetic Q/A if we have structural info
   meta_items = []
   if title:
     meta_items.append({
@@ -101,8 +101,6 @@ def parse_readme_for_train_data(readme_text: str):
       "response": title
     })
   if headers:
-    # Deduplicate and keep main ones
-    # Keep only first 15 distinct headers
     seen = set()
     main_headers = []
     for h in headers:
@@ -120,42 +118,215 @@ def parse_readme_for_train_data(readme_text: str):
       "instruction": "Briefly describe the structure of the documentation.",
       "response": f"The README starts with a title and overview, then covers sections such as: {', '.join(main_headers[:8])}."
     })
-  # If we can detect a workflow/steps section, add a tailored Q/A
+
+  # Differentiate main (H2) vs sub (H3) sections
+  h2_list = re.findall(r"^##\s+(.+)$", readme_text, flags=re.MULTILINE)
+  h3_list = re.findall(r"^###\s+(.+)$", readme_text, flags=re.MULTILINE)
+  if h2_list:
+    meta_items.append({
+      "instruction": "List the main sections (H2) in the README.",
+      "response": ", ".join([h.strip().rstrip(':') for h in h2_list[:20]])
+    })
+  if h3_list:
+    meta_items.append({
+      "instruction": "List the sub-sections (H3) in the README.",
+      "response": ", ".join([h.strip().rstrip(':') for h in h3_list[:30]])
+    })
+  # Optional outline mapping main H2 to following H3s
+  try:
+    lines = readme_text.splitlines()
+    outline = []
+    current_h2 = None
+    current_subs = []
+    for ln in lines:
+      if ln.startswith('## ') and not ln.startswith('###'):
+        if current_h2 is not None:
+          if current_subs:
+            outline.append(f"- {current_h2}: " + ", ".join(current_subs))
+          else:
+            outline.append(f"- {current_h2}")
+        current_h2 = ln[3:].strip()
+        current_subs = []
+      elif ln.startswith('### '):
+        current_subs.append(ln[4:].strip())
+    if current_h2 is not None:
+      if current_subs:
+        outline.append(f"- {current_h2}: " + ", ".join(current_subs))
+      else:
+        outline.append(f"- {current_h2}")
+    if outline:
+      meta_items.append({
+        "instruction": "Outline the main sections and their sub-sections.",
+        "response": "\n".join(outline[:20])
+      })
+  except Exception:
+    pass
   if re.search(r"(?i)workflow|quick start|detailed|step\s*\d", readme_text):
     meta_items.append({
       "instruction": "Summarize the training and deployment workflow described in the README.",
       "response": "It explains environment setup, model loading, LoRA fine-tuning, saving and merging adapters as safetensors, converting to GGUF with llama.cpp, and running the merged model with Ollama."
     })
 
-  # Merge explicit and meta items; de-duplicate by instruction text
+  # 3) Extract Step 4: Training Configuration key values and synthesize Q/A
+  key_items = []
+  try:
+    # Find the '### Step 4: Training Configuration' section
+    step4_match = re.search(r"^###\s+Step\s*4:\s*Training Configuration\s*$", readme_text, flags=re.MULTILINE)
+    if step4_match:
+      lines = readme_text.splitlines()
+      start = lines.index(step4_match.group(0)) + 1
+      bullets = []
+      for i in range(start, len(lines)):
+        ln = lines[i]
+        if ln.startswith('#'):
+          break
+        if ln.strip().startswith('- '):
+          bullets.append(ln.strip()[2:].strip())
+      if bullets:
+        bullet_text = "\n".join([f"- {b}" for b in bullets])
+        key_items.append({
+          "instruction": "What are the key effective values in this repo?",
+          "response": bullet_text
+        })
+        key_items.append({
+          "instruction": "List key training configuration values.",
+          "response": bullet_text
+        })
+  except Exception:
+    pass
+
+  # 4) Extract bash/make commands (esp. from section 3) and synthesize Q/A
+  make_items = []
+  # Capture all fenced bash blocks
+  bash_blocks = re.findall(r"```bash\n(.*?)```", readme_text, flags=re.DOTALL|re.IGNORECASE)
+  # Simple parser: collect lines starting with 'make' and optional trailing comments (# ...)
+  collected_cmds = []
+  for b in bash_blocks:
+    for raw_line in b.splitlines():
+      line = raw_line.strip()
+      if not line or line.startswith('#'):
+        continue
+      if line.startswith('make '):
+        # Extract command and inline comment description
+        parts = line.split('#', 1)
+        cmd = parts[0].strip()
+        desc = parts[1].strip() if len(parts) > 1 else ""
+        collected_cmds.append((cmd, desc))
+  # If we found any make commands, craft Q/A
+  if collected_cmds:
+    # Deduplicate while preserving order
+    seen_cmds = set(); ordered = []
+    for cmd, desc in collected_cmds:
+      if cmd not in seen_cmds:
+        seen_cmds.add(cmd); ordered.append((cmd, desc))
+    # Build a list response
+    bullets = []
+    for cmd, desc in ordered:
+      bullets.append(f"- {cmd}" + (f": {desc}" if desc else ""))
+    make_items.append({
+      "instruction": "What are the make commands in section '3. Run the Complete Pipeline'?",
+      "response": "\n".join(bullets)
+    })
+    # Also add per-command Q/A for key ones
+    for cmd, desc in ordered[:8]:  # cap to avoid bloating tiny dataset
+      q = f"What does '{cmd}' do?"
+      # Provide a concise answer; prefer the inline desc if present
+      answer = desc if desc else "Runs the corresponding step of the training/deployment pipeline defined in the Makefile."
+      make_items.append({"instruction": q, "response": answer})
+
+  # 4) Optionally enrich from Makefile (targets and brief info)
+  try:
+    mk_path = os.path.join(os.path.dirname(__file__), 'Makefile')
+    with open(mk_path, 'r', encoding='utf-8') as mf:
+      mk_text = mf.read()
+    # Find simple targets like 'train:' at line starts
+    target_lines = re.findall(r"^([a-zA-Z0-9_.-]+):\s*$", mk_text, flags=re.MULTILINE)
+    # Also detect variables that are informative
+    qtype_match = re.search(r"^QTYPE\?=\s*([^\n]+)$", mk_text, flags=re.MULTILINE)
+    merged_dir_match = re.search(r"^MERGED_DIR=([^\n]+)$", mk_text, flags=re.MULTILINE)
+    vars_info = []
+    if qtype_match:
+      vars_info.append(f"QTYPE default is {qtype_match.group(1).strip()} (quantization for GGUF)")
+    if merged_dir_match:
+      vars_info.append(f"MERGED_DIR is {merged_dir_match.group(1).strip()} (path to merged safetensors model)")
+    if target_lines:
+      # Summarize targets
+      make_items.append({
+        "instruction": "List available Makefile targets and important variables.",
+        "response": "Targets: " + ", ".join(target_lines) + (". " + "; ".join(vars_info) if vars_info else "")
+      })
+      # Add specific helpful Q/A for convert and all
+      if 'convert' in target_lines:
+        make_items.append({
+          "instruction": "How do I convert the merged model to GGUF?",
+          "response": "Run 'make convert' (optionally set QTYPE, e.g., make convert QTYPE=q8_0)."
+        })
+      if 'all' in target_lines:
+        make_items.append({
+          "instruction": "What steps does 'make all' perform?",
+          "response": "It runs training, conversion to GGUF, creates the Ollama model, and runs it: train → convert → ollama-create → ollama-run."
+        })
+  except Exception:
+    pass
+
+  # Merge explicit, meta, key (Step 4), and make items; de-duplicate by instruction text
   all_items = []
   seen_instr = set()
-  for d in items + meta_items:
+  for d in items + meta_items + key_items + make_items:
     inst = d.get("instruction", "").strip()
     resp = d.get("response", "").strip()
     if not inst or not resp:
       continue
-    if inst.lower() in seen_instr:
+    key = inst.lower()
+    if key in seen_instr:
       continue
-    seen_instr.add(inst.lower())
+    seen_instr.add(key)
     all_items.append({"instruction": inst, "response": resp})
 
   return all_items
 
-readme_text = None
-try:
-  with open(README_PATH, "r", encoding="utf-8") as f:
-    readme_text = f.read()
-except Exception:
+# CLI args
+parser = argparse.ArgumentParser()
+parser.add_argument("--dataset", type=str, default=None, help="Path to JSONL dataset file prepared by prepare.py")
+parser.add_argument("--device", type=str, default=None)
+parser.add_argument("--precision", type=str, default=None)
+args, _ = parser.parse_known_args()
+
+train_examples = None
+if args.dataset and os.path.exists(args.dataset):
+  # Read JSONL
+  items = []
+  with open(args.dataset, "r", encoding="utf-8") as f:
+    for line in f:
+      line = line.strip()
+      if not line:
+        continue
+      try:
+        obj = json.loads(line)
+        inst = str(obj.get("instruction", "")).strip()
+        resp = str(obj.get("response", "")).strip()
+        if inst and resp:
+          items.append({"instruction": inst, "response": resp})
+      except Exception:
+        continue
+  if items:
+    train_examples = items
+    print(f"[INFO] Loaded {len(items)} examples from {args.dataset}")
+
+if train_examples is None:
+  # Fallback to in-script README parsing for backward compatibility
   readme_text = None
-
-parsed_items = parse_readme_for_train_data(readme_text) if readme_text else []
-if not parsed_items:
-  print("[INFO] Falling back to default examples (README.md not found or no train_data block detected).")
-  parsed_items = DEFAULT_EXAMPLES
-
-# Allow duplication via DUPLICATES for stronger signal on tiny datasets
-train_examples = parsed_items * DUPLICATES
+  try:
+    with open(README_PATH, "r", encoding="utf-8") as f:
+      readme_text = f.read()
+  except Exception:
+    readme_text = None
+  parsed_items = parse_readme_for_train_data(readme_text) if readme_text else []
+  if not parsed_items:
+    print("[INFO] Falling back to default examples (README.md not found or no train_data block detected).")
+    parsed_items = DEFAULT_EXAMPLES
+  # Apply duplication only when building inside train.py
+  train_examples = parsed_items * DUPLICATES
 
 # ---- Tokenizer / Model ----
 tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL, trust_remote_code=True)
@@ -164,7 +335,7 @@ if tokenizer.pad_token is None:
 tokenizer.padding_side = "right"
 
 # Load model
-model = AutoModelForCausalLM.from_pretrained(BASE_MODEL, torch_dtype=torch_dtype, device_map="auto", trust_remote_code=True)
+model = AutoModelForCausalLM.from_pretrained(BASE_MODEL, dtype=torch_dtype, device_map="auto", trust_remote_code=True)
 
 # If you loaded a quantized model on CUDA, prepare; otherwise skip
 try:
@@ -299,7 +470,7 @@ trainer.save_model(OUTPUT_DIR)
 tokenizer.save_pretrained(OUTPUT_DIR)
 
 # ---- Merge and save merged model ----
-peft_model = AutoPeftModelForCausalLM.from_pretrained(OUTPUT_DIR, torch_dtype=torch_dtype, device_map="auto")
+peft_model = AutoPeftModelForCausalLM.from_pretrained(OUTPUT_DIR, dtype=torch_dtype, device_map="auto")
 merged = peft_model.merge_and_unload()
 merged.save_pretrained(MERGED_DIR, safe_serialization=True)
 tokenizer.save_pretrained(MERGED_DIR)
@@ -328,7 +499,19 @@ merged_pipe = pipeline("text-generation", model=MERGED_DIR, tokenizer=tokenizer,
 out = merged_pipe(f"### Instruction:\n{EVAL_INSTRUCTION}\n\n### Response:", max_new_tokens=64, do_sample=False, temperature=0.0)
 print("\nMerged model output:\n", extract_response(out[0]["generated_text"]))
 
-# additional abstract question to validate README-aware training
-ABSTRACT_Q = "List the main sections in the README."
-abstract_out = merged_pipe(f"### Instruction:\n{ABSTRACT_Q}\n\n### Response:", max_new_tokens=128, do_sample=False, temperature=0.0)
-print("\nMerged model (abstract Q) output:\n", extract_response(abstract_out[0]["generated_text"]))
+# additional abstract questions to validate README-aware training
+ABSTRACT_Q1 = "List the main sections in the README."
+abstract_out1 = merged_pipe(f"### Instruction:\n{ABSTRACT_Q1}\n\n### Response:", max_new_tokens=128, do_sample=False, temperature=0.0)
+print("\nMerged model (abstract Q1) output:\n", extract_response(abstract_out1[0]["generated_text"]))
+
+ABSTRACT_Q2 = "What are the make commands in section '3. Run the Complete Pipeline'?"
+abstract_out2 = merged_pipe(f"### Instruction:\n{ABSTRACT_Q2}\n\n### Response:", max_new_tokens=256, do_sample=False, temperature=0.0)
+print("\nMerged model (abstract Q2) output:\n", extract_response(abstract_out2[0]["generated_text"]))
+
+ABSTRACT_Q3 = "What are the key effective values in this repo?"
+abstract_out3 = merged_pipe(f"### Instruction:\n{ABSTRACT_Q3}\n\n### Response:", max_new_tokens=256, do_sample=False, temperature=0.0)
+print("\nMerged model (abstract Q3) output:\n", extract_response(abstract_out3[0]["generated_text"]))
+
+ABSTRACT_Q4 = "List the sub-sections (H3) in the README."
+abstract_out4 = merged_pipe(f"### Instruction:\n{ABSTRACT_Q4}\n\n### Response:", max_new_tokens=256, do_sample=False, temperature=0.0)
+print("\nMerged model (abstract Q4) output:\n", extract_response(abstract_out4[0]["generated_text"]))

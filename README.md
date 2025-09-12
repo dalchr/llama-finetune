@@ -69,17 +69,18 @@ You need a Hugging Face account (no special access required for the Qwen base us
 huggingface-cli login
 ```
 
-### 3. Run the Complete Pipeline
+### 3. Prepare Dataset and Run the Complete Pipeline
 
 ```bash
-# Train, convert, create Ollama model, and run it in one go:
+# Prepare dataset (parses README.md and synthesizes Q/A), then run all steps:
 make all
 
 # Or run individual steps:
-make train          # Fine-tune and merge LoRA adapters
-make convert        # Convert to GGUF format
-make ollama-create  # Create Ollama model
-make ollama-run     # Test the model
+make prepare                    # Produce dataset.txt (JSONL with {instruction,response})
+make train DATASET=dataset.txt  # Fine-tune and merge LoRA adapters
+make convert                    # Convert to GGUF format
+make ollama-create              # Create Ollama model
+make ollama-run                 # Test the model
 ```
 
 ## 🔧 Detailed Workflow
@@ -100,12 +101,12 @@ model = AutoModelForCausalLM.from_pretrained(
 )
 ```
 
-### Step 2: Training Data Format (Parsed from README.md)
+### Step 2: Training Data Format (Prepared by prepare.py)
 
 Example training data for a customer support assistant:
 
 ```python
-# train.py automatically parses this code block from README.md
+# prepare.py parses this code block from README.md and synthesizes additional Q/A
 # to build the fine-tuning dataset. Keep key names exactly as below.
 train_data = [
   {
@@ -215,10 +216,10 @@ ollama run finetuned-qwen
 
 ## 🧪 Testing the Finetuned Model
 
-### How train.py uses README.md
-- train.py parses this README for a Python code block that defines `train_data = [...]` to build the dataset.
-- It also synthesizes meta Q/A from the README structure (title and section headers), enabling the finetuned model to answer abstract questions like “What is this README about?” or “List the main sections in the README.”
-- If no block is found, it falls back to a small default dataset.
+### How the dataset is prepared and used
+- Run `make prepare` (or `python prepare.py`) to parse this README for a Python code block that defines `train_data = [...]` and to synthesize meta Q/A from the README structure (title and section headers) and Makefile.
+- The output is a JSON Lines file (default: `dataset.txt`) where each line contains `{ "instruction": ..., "response": ... }`.
+- Then run `make train DATASET=dataset.txt` (or `python train.py --dataset dataset.txt`). If `--dataset` is omitted, train.py will fall back to its internal README parsing for backward compatibility, but the recommended path is to use prepare.py.
 
 ### Early Stopping by Gradient Norm
 - A custom `GradNormEarlyStopCallback` stops training when the average gradient norm improvement per epoch is below a threshold.
@@ -255,18 +256,36 @@ print(out[0]["generated_text"])
 ```mermaid
 sequenceDiagram
     participant Dev as Developer
+    participant Env as Conda Env
+    participant Make as Makefile
+    participant Prep as prepare.py (Dataset Prep)
     participant HF as HuggingFace
-    participant Train as train.py (LoRA + Transformers)
-    participant Merge as Safetensors Merge
+    participant Train as train.py (LoRA + merge)
     participant LCPP as llama.cpp (convert to GGUF)
+    participant FS as File system
     participant Ollama as Ollama Runtime
-    Dev ->> HF: Download base model (Qwen3-4B-Instruct)
-    Dev ->> Train: Run fine-tuning with LoRA
-    Train ->> Merge: Save merged model in safetensors
-    Merge ->> LCPP: Convert to GGUF
-    LCPP ->> Ollama: Register model via Modelfile
-    Dev ->> Ollama: Run finetuned model and query
-    Ollama -->> Dev: Return tailored response
+
+    Dev ->> Env: conda activate llama-finetune
+    Dev ->> Make: make all
+    Make ->> Prep: prepare
+    Prep ->> FS: write dataset.txt (JSONL)
+    Make ->> HF: download base model (Qwen3-4B-Instruct)
+    Make ->> Train: train (LoRA fine-tune + save + merge)
+    Train ->> FS: finetuned-qwen-masked (adapters) + finetuned-qwen-masked-merged (safetensors)
+    Make ->> LCPP: convert (QTYPE=q8_0)
+    LCPP ->> FS: finetuned-qwen-merged.q8_0.gguf
+    Make ->> Ollama: create (Modelfile)
+    Ollama ->> FS: register finetuned-qwen:latest
+    Make ->> Ollama: run (optional)
+    Ollama -->> Dev: interactive responses
+
+    Note over Dev,Make: make all orchestrates prepare → train → convert → ollama-create → ollama-run
+```
+
+Note: In this workflow, the developer typically only activates the Conda environment and runs `make all`. All intermediate artifacts are written to the local file system by the respective tools. You can later run the model manually from the command line with:
+
+```bash
+dev$ ollama run finetuned-qwen:latest
 ```
 
 ## 🔄 Makefile Commands
@@ -282,11 +301,12 @@ GGUF_MODEL=finetuned-qwen-merged.$(QTYPE).gguf
 OLLAMA_MODEL=finetuned-qwen
 
 # Available commands:
-# make train           # Fine-tune and merge LoRA adapters
-# make convert         # Convert to GGUF using llama.cpp
-# make ollama-create   # Create Ollama model
-# make ollama-run      # Run Ollama model
-# make all             # Run everything in order
+# make prepare                     # Generate dataset.txt (JSONL)
+# make train DATASET=dataset.txt   # Fine-tune and merge LoRA adapters
+# make convert                     # Convert to GGUF using llama.cpp
+# make ollama-create               # Create Ollama model
+# make ollama-run                  # Run Ollama model
+# make all                         # Prepare + train + convert + create + run
 ```
 
 ## 🐳 Docker Support

@@ -4,8 +4,11 @@ QTYPE?=q8_0
 GGUF_MODEL=finetuned-qwen-merged.$(QTYPE).gguf
 OLLAMA_MODEL=finetuned-qwen
 
+prepare:
+	$(PYTHON) prepare.py --out $(or $(DATASET),dataset.txt) --duplicates $(or $(DUPLICATES),10)
+
 train:
-	$(PYTHON) train.py --device $(or $(DEVICE),auto) --precision $(or $(PRECISION),auto)
+	$(PYTHON) train.py --device $(or $(DEVICE),auto) --precision $(or $(PRECISION),auto) --dataset $(or $(DATASET),dataset.txt)
 
 convert: $(MERGED_DIR)
 	@if [ ! -d llama.cpp ]; then git clone https://github.com/ggerganov/llama.cpp; fi
@@ -54,4 +57,4 @@ convert-only:
 
 skip-train: convert-only ollama-create ollama-run
 
-all: train convert ollama-create ollama-run
+all: prepare train convert ollama-create ollama-run
