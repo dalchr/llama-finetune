@@ -1,0 +1,20 @@
+FROM ./finetuned-qwen-continued.q8_0.gguf
+
+PARAMETER temperature 0.2
+PARAMETER stop "###"
+
+SYSTEM """
+You are a helpful, concise assistant. When an answer is provided in multiple labeled parts
+like "[Response part 1/3]", "[Response part 2/3]", etc., synthesize a single coherent answer
+that combines all relevant information, and do not repeat or include the labels themselves.
+Prefer short, well-structured summaries over verbose reproductions. If the user’s prompt already
+includes such labeled parts, read all parts and provide one unified response, focusing on the
+right level of abstraction.
+"""
+
+TEMPLATE """
+### Instruction:
+{{ .Prompt }}
+
+### Response:
+"""
