@@ -24,6 +24,8 @@ DUPLICATES = 10  # repeat example to dominate loss
 
 # ---- Device / dtype ----
 device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+# Use fp32 on MPS for stability (bf16 on MPS can cause NaNs), fp16 on CUDA, fp32 on CPU
+# torch_dtype = torch.float16 if device == "cuda" else torch.float32
 torch_dtype = torch.float16 if device == "cuda" else torch.bfloat16 if device == "mps" else torch.float32
 print(f">>> device={device}, dtype={torch_dtype}")
 
@@ -350,6 +352,17 @@ except Exception:
   # prepare_model_for_kbit_training may error for non-quantized loads; it's fine to continue.
   pass
 
+# try:
+#  if device == "cuda":
+#     model.gradient_checkpointing_enable()
+#     model = prepare_model_for_kbit_training(model)
+#   else:
+#     # On MPS/CPU use full precision and avoid gradient checkpointing for stability
+#     pass
+# except Exception:
+#   # prepare_model_for_kbit_training may error for non-quantized loads; it's fine to continue.
+#   pass
+
 # ---- Build dataset with explicit label masking ----
 def build_sample(inst, resp):
   # prompt must match EXACT format used at eval
@@ -379,14 +392,26 @@ def build_sample(inst, resp):
 
   return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
 
-prepared = [build_sample(d["instruction"], d["response"]) for d in train_examples]
+prepared_all = [build_sample(d["instruction"], d["response"]) for d in train_examples]
+# Filter out samples that ended up with no labels (all -100), which would yield zero loss
+filtered = []
+for ex in prepared_all:
+  labels = ex["labels"]
+  has_label = any(l != -100 for l in labels)
+  if has_label:
+    filtered.append(ex)
+if len(filtered) == 0:
+  # Fallback to default examples to avoid empty training
+  fallback = [build_sample(d["instruction"], d["response"]) for d in DEFAULT_EXAMPLES]
+  filtered = fallback
+print(f"[INFO] Prepared {len(filtered)} valid samples (dropped {len(prepared_all)-len(filtered)} with no labels)")
 # simple split: last example as eval if we have at least 2, otherwise duplicate one for eval
-if len(prepared) >= 2:
-  prepared_train = prepared[:-1]
-  prepared_eval = [prepared[-1]]
+if len(filtered) >= 2:
+  prepared_train = filtered[:-1]
+  prepared_eval = [filtered[-1]]
 else:
-  prepared_train = prepared
-  prepared_eval = prepared  # same example if only one
+  prepared_train = filtered
+  prepared_eval = filtered  # same example if only one
 train_dataset = Dataset.from_list(prepared_train)
 eval_dataset = Dataset.from_list(prepared_eval)
 
@@ -452,9 +477,10 @@ training_args = TrainingArguments(
   gradient_accumulation_steps=1,
   learning_rate=LR,
   num_train_epochs=EPOCHS,
+  # fp16=(device=="cuda"),
+  # bf16=False,
   fp16=(torch_dtype==torch.float16),
-  bf16=(torch_dtype==torch.bfloat16),
-  save_strategy="epoch",
+  bf16=(torch_dtype==torch.bfloat16),save_strategy="epoch",
   eval_strategy="epoch",
   load_best_model_at_end=True,
   metric_for_best_model="eval_loss",
@@ -481,6 +507,7 @@ merged.save_pretrained(MERGED_DIR, safe_serialization=True)
 tokenizer.save_pretrained(MERGED_DIR)
 
 print("✅ Training + merge done.")
+print(f"[INFO] device={device}, dtype={torch_dtype}; train={len(prepared_train)} eval={len(prepared_eval)}")
 
 # ---- Quick tests: 1) PEFT model (adapter)  2) merged model ----
 def extract_response(generated_text: str):

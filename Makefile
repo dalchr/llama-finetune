@@ -6,7 +6,7 @@ OLLAMA_MODEL=finetuned-qwen
 MAX_LEN?=128
 
 prepare:
-	MAX_LEN=$(MAX_LEN) $(PYTHON) prepare.py --out $(or $(DATASET),dataset.txt) --duplicates $(or $(DUPLICATES),10) --max-len $(MAX_LEN)
+	$(PYTHON) prepare.py --out $(or $(DATASET),dataset.txt) --duplicates $(or $(DUPLICATES),10)
 
 train:
 	MAX_LEN=$(MAX_LEN) $(PYTHON) train.py --device $(or $(DEVICE),auto) --precision $(or $(PRECISION),auto) --dataset $(or $(DATASET),dataset.txt) --max-len $(MAX_LEN)
@@ -57,5 +57,8 @@ convert-only:
 		fi
 
 skip-train: convert-only ollama-create ollama-run
+
+test:
+	$(PYTHON) test.py --dataset $(or $(DATASET),dataset.txt) --samples $(or $(SAMPLES),10)
 
 all: prepare train convert ollama-create ollama-run
