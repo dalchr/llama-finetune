@@ -259,24 +259,27 @@ sequenceDiagram
     participant Env as Conda Env
     participant Make as Makefile
     participant Prep as prepare.py (Dataset Prep)
+    participant FS as File system
     participant HF as HuggingFace
     participant Train as train.py (LoRA + merge)
     participant LCPP as llama.cpp (convert to GGUF)
-    participant FS as File system
     participant Ollama as Ollama Runtime
 
     Dev ->> Env: conda activate llama-finetune
-    Dev ->> Make: make all
+    Env -->> Dev: <conda shell>
+    Dev ->> Env: make all
+    Env -->> Make: make all
     Make ->> Prep: prepare
-    Prep ->> FS: write dataset.txt (JSONL)
-    Make ->> HF: download base model (Qwen3-4B-Instruct)
-    Make ->> Train: train (LoRA fine-tune + save + merge)
-    Train ->> FS: finetuned-qwen-masked (adapters) + finetuned-qwen-masked-merged (safetensors)
+    Prep -->> FS: write dataset.txt (JSONL)
+    Make -->> HF: download base model (Qwen3-4B-Instruct)
+    Make ->> Train: train (dataset.txt, LoRA fine-tune + save + merge)
+    Train -->> FS: load dataset.txt
+    Train -->> FS: finetuned-qwen-masked (adapters) + finetuned-qwen-masked-merged (safetensors)
     Make ->> LCPP: convert (QTYPE=q8_0)
-    LCPP ->> FS: finetuned-qwen-merged.q8_0.gguf
+    LCPP -->> FS: finetuned-qwen-merged.q8_0.gguf
     Make ->> Ollama: create (Modelfile)
-    Ollama ->> FS: register finetuned-qwen:latest
-    Make ->> Ollama: run (optional)
+    Ollama -->> FS: register finetuned-qwen:latest
+    Dev ->> Ollama: 'ollama run finetuned-qwen:latest' (optional)
     Ollama -->> Dev: interactive responses
 
     Note over Dev,Make: make all orchestrates prepare → train → convert → ollama-create → ollama-run
