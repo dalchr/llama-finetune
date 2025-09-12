@@ -3,12 +3,13 @@ MERGED_DIR=./finetuned-qwen-masked-merged
 QTYPE?=q8_0
 GGUF_MODEL=finetuned-qwen-merged.$(QTYPE).gguf
 OLLAMA_MODEL=finetuned-qwen
+MAX_LEN?=128
 
 prepare:
-	$(PYTHON) prepare.py --out $(or $(DATASET),dataset.txt) --duplicates $(or $(DUPLICATES),10)
+	MAX_LEN=$(MAX_LEN) $(PYTHON) prepare.py --out $(or $(DATASET),dataset.txt) --duplicates $(or $(DUPLICATES),10) --max-len $(MAX_LEN)
 
 train:
-	$(PYTHON) train.py --device $(or $(DEVICE),auto) --precision $(or $(PRECISION),auto) --dataset $(or $(DATASET),dataset.txt)
+	MAX_LEN=$(MAX_LEN) $(PYTHON) train.py --device $(or $(DEVICE),auto) --precision $(or $(PRECISION),auto) --dataset $(or $(DATASET),dataset.txt) --max-len $(MAX_LEN)
 
 convert: $(MERGED_DIR)
 	@if [ ! -d llama.cpp ]; then git clone https://github.com/ggerganov/llama.cpp; fi

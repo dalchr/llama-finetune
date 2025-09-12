@@ -15,7 +15,7 @@ from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training, Au
 BASE_MODEL = "unsloth/Qwen3-4B-Instruct-2507"
 OUTPUT_DIR = "./finetuned-qwen-masked"
 MERGED_DIR = "./finetuned-qwen-masked-merged"
-MAX_LEN = 128
+MAX_LEN = int(os.environ.get("MAX_LEN", "128"))
 EPOCHS = 10 # EPOCHS = 20-30 (depending on LR => loss, grad_norm)
 LR = 5e-5 # Recommended # LR = 1e-4 # With ultra-tiny datasets, lr=1e-4 can overshoot after a while. # LR = 1e-5 # Try 1e-5 or even 5e-6. The model converges slower but avoids flipping at the end.
 BATCH_SIZE = 1   # small batch for tiny dataset
@@ -290,7 +290,12 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--dataset", type=str, default=None, help="Path to JSONL dataset file prepared by prepare.py")
 parser.add_argument("--device", type=str, default=None)
 parser.add_argument("--precision", type=str, default=None)
+parser.add_argument("--max-len", type=int, default=None, dest="max_len")
 args, _ = parser.parse_known_args()
+
+# Allow overriding MAX_LEN via CLI or environment
+if args.max_len is not None:
+  MAX_LEN = int(args.max_len)
 
 train_examples = None
 if args.dataset and os.path.exists(args.dataset):

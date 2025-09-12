@@ -367,7 +367,8 @@ CMD ["python", "train.py"]
 
 ### Data Handling
 - DUPLICATES: the number of times parsed training examples are repeated to strengthen signal on tiny datasets (default 10).
-- MAX_LEN: sequences are right-padded; prompt tokens are masked out of the loss so only the response is learned.
+- MAX_LEN: shared between prepare.py and train.py via Makefile (MAX_LEN?=128). Makefile passes MAX_LEN to both scripts; you can override with e.g. `make all MAX_LEN=256`.
+- Chunking: prepare.py splits long instructions and especially long responses into multiple chunks guided by MAX_LEN, appending simple part markers (e.g., "[Response part 2/3]") so the model can learn to produce complete multi-part outputs for long, structured answers (like outlines) without being truncated.
 
 ### Training Parameters
 

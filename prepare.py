@@ -222,11 +222,89 @@ def parse_readme_for_train_data(readme_text: str):
   return all_items
 
 
+def _estimate_chars_per_token():
+  # Simple heuristic: ~4 chars per token for English-ish text
+  try:
+    return float(os.environ.get("CHARS_PER_TOKEN", "4.0"))
+  except Exception:
+    return 4.0
+
+
+def _chunk_long_text(text: str, max_chars: int, overlap: int = 40):
+  text = (text or "").strip()
+  if max_chars <= 0 or len(text) <= max_chars:
+    return [text]
+  chunks = []
+  start = 0
+  n = len(text)
+  # Ensure positive progress even if overlap is large relative to max_chars
+  effective_overlap = max(0, min(overlap, max_chars - 1))
+  safety_counter = 0
+  safety_limit = 100000  # hard cap to avoid infinite loops on pathological inputs
+  while start < n and safety_counter < safety_limit:
+    safety_counter += 1
+    end = min(n, start + max_chars)
+    cut = end
+    # Try to cut on whitespace/punctuation within the last 80 chars, but not too close to start
+    for i in range(end, max(start + 1, end - 80), -1):
+      if text[i-1] in " .,;:!?\n\t-]})" and (i - start) > max(1, min(40, max_chars // 2)):
+        cut = i
+        break
+    # Guarantee forward progress
+    if cut <= start:
+      cut = min(n, start + max(1, max_chars))
+    chunk = text[start:cut].strip()
+    chunks.append(chunk)
+    if cut >= n:
+      break
+    # Compute next start with bounded overlap; ensure it advances
+    next_start = max(0, cut - effective_overlap)
+    if next_start <= start:
+      next_start = min(n, start + max(1, max_chars // 2))
+    start = next_start
+  # Deduplicate possible overlaps at ends
+  cleaned = []
+  for c in chunks:
+    if not cleaned or c != cleaned[-1]:
+      cleaned.append(c)
+  return cleaned
+
+
+def _chunk_example(inst: str, resp: str, max_len_tokens: int):
+  # Reserve a budget for prompt tokens; remaining for response
+  # Prompt is: "### Instruction:\n{inst}\n\n### Response:\n" → approximate tokens
+  chars_per_tok = _estimate_chars_per_token()
+  prompt_overhead_tokens = 32  # rough
+  # Instruction budget; if instruction is huge, split it too
+  max_inst_tokens = max(16, int(max_len_tokens * 0.35))
+  max_resp_tokens = max(32, max_len_tokens - prompt_overhead_tokens - max_inst_tokens)
+  max_inst_chars = int(max_inst_tokens * chars_per_tok)
+  max_resp_chars = int(max_resp_tokens * chars_per_tok)
+
+  inst_chunks = _chunk_long_text(inst, max_inst_chars, overlap=20)
+  result = []
+  for i_inst, inst_chunk in enumerate(inst_chunks, start=1):
+    inst_suffix = f" (part {i_inst}/{len(inst_chunks)})" if len(inst_chunks) > 1 else ""
+    inst_final = f"{inst_chunk}{inst_suffix}".strip()
+    resp_chunks = _chunk_long_text(resp, max_resp_chars, overlap=60)
+    if len(resp_chunks) == 1:
+      result.append({"instruction": inst_final, "response": resp_chunks[0]})
+    else:
+      for i_resp, resp_chunk in enumerate(resp_chunks, start=1):
+        resp_head = f"[Response part {i_resp}/{len(resp_chunks)}]\n"
+        result.append({"instruction": inst_final, "response": resp_head + resp_chunk})
+  return result
+
+
 def main():
   ap = argparse.ArgumentParser()
   ap.add_argument("--out", default="dataset.txt", help="Path to output JSONL dataset file")
   ap.add_argument("--duplicates", type=int, default=10, help="Repeat examples N times for tiny datasets")
+  ap.add_argument("--max-len", type=int, default=None, dest="max_len", help="MAX_LEN in tokens; defaults from env MAX_LEN or 128")
   args = ap.parse_args()
+
+  # Resolve MAX_LEN to guide chunking
+  max_len_tokens = args.max_len if args.max_len is not None else int(os.environ.get("MAX_LEN", "128"))
 
   try:
     with open(README_PATH, "r", encoding="utf-8") as f:
@@ -239,17 +317,22 @@ def main():
     print("[INFO] Falling back to default examples (README.md not found or no train_data block detected).")
     items = DEFAULT_EXAMPLES
 
-  # Apply duplicates
+  # Apply duplicates first (so chunking creates more varied ordering across duplicates)
   items = items * max(1, args.duplicates)
+
+  # Chunk long instruction/response pairs according to max_len_tokens
+  expanded = []
+  for ex in items:
+    expanded.extend(_chunk_example(ex["instruction"], ex["response"], max_len_tokens))
 
   # Write JSONL
   n = 0
   with open(args.out, "w", encoding="utf-8") as out:
-    for ex in items:
+    for ex in expanded:
       json.dump({"instruction": ex["instruction"], "response": ex["response"]}, out, ensure_ascii=False)
       out.write("\n")
       n += 1
-  print(f"[OK] Wrote {n} examples to {args.out}")
+  print(f"[OK] Wrote {n} examples to {args.out} (from {len(items)} base items; MAX_LEN={max_len_tokens})")
 
 
 if __name__ == "__main__":
