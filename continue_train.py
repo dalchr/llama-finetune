@@ -174,19 +174,32 @@ training_args = TrainingArguments(
 )
 
 class GradNormEarlyStopCallback(TrainerCallback):
-  def __init__(self, min_improvement: float = 0.001, patience: int = 1):
+  def __init__(self, min_improvement: float = 0.1, patience: int = 1):
+    # Require at least 0.1 decrease in gradient norm per epoch by default
     self.min_improvement = float(min_improvement)
+    # Patience here acts both as the max number of epochs to try and the early-stop patience for bad epochs
     self.patience = int(patience)
     self.best = None
     self.bad_epochs = 0
+    self._epochs_run = 0
     self._accum_grad_sq = 0.0
+    self._steps_in_epoch = 0
+    self._model_ref = None
+
   def on_train_begin(self, args, state: TrainerState, control: TrainerControl, **kwargs):
     self.best = None
     self.bad_epochs = 0
+    self._epochs_run = 0
     self._accum_grad_sq = 0.0
-  def on_step_end(self, args, state: TrainerState, control: TrainerControl, **kwargs):
-    model = kwargs.get("model")
+    self._steps_in_epoch = 0
+    # cache model reference for later callback hooks (kwargs may omit it)
+    self._model_ref = kwargs.get("model", None)
+
+  def on_pre_optimizer_step(self, args, state: TrainerState, control: TrainerControl, **kwargs):
+    # Called before optimizer.step() and after gradient clipping; gradients are populated here.
+    model = kwargs.get("model") or self._model_ref
     if model is None:
+      # cannot compute grad norm without model reference
       return
     total_sq = 0.0
     for p in model.parameters():
@@ -196,18 +209,40 @@ class GradNormEarlyStopCallback(TrainerCallback):
           total_sq += float(g.detach().pow(2).sum().item())
         except Exception:
           pass
+    # accumulate L2 norm of gradients for this step (or accumulated grads if using grad accumulation)
     self._accum_grad_sq += total_sq ** 0.5 if total_sq > 0 else 0.0
+    self._steps_in_epoch += 1
+
   def on_epoch_end(self, args, state: TrainerState, control: TrainerControl, **kwargs):
-    steps_this_epoch = max(1, int(round(state.max_steps * (state.epoch or 0) / (args.num_train_epochs or 1))) - state.global_step)
-    avg_grad_norm = self._accum_grad_sq / max(1, steps_this_epoch)
-    if self.best is None or avg_grad_norm - self.best > self.min_improvement:
+    # Use actual seen steps this epoch
+    steps_this_epoch = max(1, self._steps_in_epoch)
+    avg_grad_norm = self._accum_grad_sq / steps_this_epoch
+
+    # Increment total epochs attempted
+    self._epochs_run += 1
+
+    if self.best is None:
       self.best = avg_grad_norm
-      self.bad_epochs = 0
+      print(f"[continue][early_stop] epoch_end: avg_grad_norm={avg_grad_norm:.6f} (init best)")
     else:
-      self.bad_epochs += 1
-      if self.bad_epochs >= self.patience:
+      # smaller is better: improvement is decrease in avg grad norm
+      improvement = self.best - avg_grad_norm
+      print(f"[continue][early_stop] epoch_end: avg_grad_norm={avg_grad_norm:.6f}, prev_best={self.best:.6f}, improvement={improvement:.6f}")
+      # Require each epoch to improve by at least min_improvement (default 0.1)
+      if improvement >= self.min_improvement:
+        self.best = avg_grad_norm
+      else:
+        print(f"[continue][early_stop] Improvement {improvement:.4f} < required {self.min_improvement:.4f}. Stopping.")
         control.should_training_stop = True
+
+    # Enforce hard cap on total epochs attempted
+    if self._epochs_run >= self.patience:
+      print(f"[continue][early_stop] Reached patience cap: {self._epochs_run} epoch(s). Stopping.")
+      control.should_training_stop = True
+
+    # reset for next epoch
     self._accum_grad_sq = 0.0
+    self._steps_in_epoch = 0
 
 # Debug: ensure LoRA adapters are trainable
 trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -247,7 +282,7 @@ trainer = Trainer(
   train_dataset=train_dataset,
   eval_dataset=eval_dataset,
   callbacks=[
-    EarlyStoppingCallback(early_stopping_patience=EPOCHS, early_stopping_threshold=0.0001),
+    EarlyStoppingCallback(early_stopping_patience=EPOCHS, early_stopping_threshold=0.001),
     GradNormEarlyStopCallback(min_improvement=0.0001, patience=EPOCHS)
   ],
 )
