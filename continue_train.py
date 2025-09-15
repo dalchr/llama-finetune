@@ -247,8 +247,8 @@ trainer = Trainer(
   train_dataset=train_dataset,
   eval_dataset=eval_dataset,
   callbacks=[
-    EarlyStoppingCallback(early_stopping_patience=3, early_stopping_threshold=0.0001),
-    GradNormEarlyStopCallback(min_improvement=0.0001, patience=2)
+    EarlyStoppingCallback(early_stopping_patience=EPOCHS, early_stopping_threshold=0.0001),
+    GradNormEarlyStopCallback(min_improvement=0.0001, patience=EPOCHS)
   ],
 )
 trainer.train()

@@ -1,3 +1,5 @@
+.DEFAULT_GOAL := help
+
 PYTHON=python
 MERGED_DIR=./finetuned-qwen-masked-merged
 # Continued (second-stage) defaults
@@ -8,6 +10,31 @@ GGUF_MODEL_CONT=finetuned-qwen-continued.$(QTYPE).gguf
 OLLAMA_MODEL=finetuned-qwen
 OLLAMA_MODEL_CONT=finetuned-qwen-continued
 MAX_LEN?=128
+
+help:
+	@echo "Usage: make <target> [VARS...]"
+	@echo ""
+	@echo "Common targets:"
+	@echo "  prepare                 - Build dataset.jsonl (override DATASET, DUPLICATES)"
+	@echo "  train                   - Fine-tune base model (override DATASET, DEVICE, PRECISION, MAX_LEN)"
+	@echo "  convert                 - Convert merged HF model to GGUF (override QTYPE)"
+	@echo "  ollama-create           - Create Ollama model from GGUF"
+	@echo "  ollama-run              - Run the Ollama model"
+	@echo "  all                     - Run prepare -> train -> convert -> ollama-create -> ollama-run"
+	@echo ""
+	@echo "Continued training targets:"
+	@echo "  continue                - Continue fine-tuning from prior output on new dataset (override DATASET_CONT, PREV_MODEL, OUT_DIR, MERGED_OUT_DIR, MAX_LEN)"
+	@echo "  convert-continued       - Convert the continued merged model to GGUF (override QTYPE)"
+	@echo "  ollama-create-continued - Create Ollama model for the continued GGUF"
+	@echo "  ollama-run-continued    - Run the continued Ollama model"
+	@echo "  continue-all            - continue -> convert-continued -> ollama-create-continued -> ollama-run-continued"
+	@echo ""
+	@echo "Other:"
+	@echo "  convert-only            - Convert existing merged model without re-training"
+	@echo "  skip-train              - Convert and run Ollama without re-training"
+	@echo "  test                    - Quick generation tests (override DATASET, SAMPLES)"
+	@echo ""
+	@echo "Variables: DATASET=dataset.txt DATASET_CONT=dataset_test.txt QTYPE=$(QTYPE) MAX_LEN=$(MAX_LEN)"
 
 prepare:
 	$(PYTHON) prepare.py --out $(or $(DATASET),dataset.txt) --duplicates $(or $(DUPLICATES),10)
